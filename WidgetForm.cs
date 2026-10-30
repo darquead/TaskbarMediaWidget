@@ -138,6 +138,7 @@ namespace TaskbarMediaWidget
         private Point _dragStartCursor;
         private Point _dragStartLocation;
         private bool _hasDragged = false;
+        public event Action OnLanguageChanged;
 
         private Font _iconFont;
         private Font _textFont;
@@ -318,13 +319,14 @@ namespace TaskbarMediaWidget
                 _isVertical = false;
                 Size = new Size(BaseWidth, BaseHeight);
 
-                // 2. Place at saved Free coordinates
+                // 2. Place at saved Free coordinates (clamped to WorkingArea so it never ends up under the taskbar)
                 int x = _config.FreeX;
                 int y = _config.FreeY;
-                if (x <= 0 && y <= 0)
+                Rectangle wa = Screen.FromPoint(new Point(x, y)).WorkingArea;
+                if ((x <= 0 && y <= 0) || x < wa.Left || x > wa.Right - Width || y < wa.Top || y > wa.Bottom - Height)
                 {
-                    x = (Screen.PrimaryScreen.Bounds.Width - Width) / 2;
-                    y = 100;
+                    x = Math.Max(wa.Left, Math.Min(wa.Right - Width, (wa.Width - Width) / 2));
+                    y = Math.Max(wa.Top, Math.Min(wa.Bottom - Height, wa.Top + 100));
                     _config.FreeX = x;
                     _config.FreeY = y;
                     _config.Save();
@@ -663,8 +665,19 @@ namespace TaskbarMediaWidget
                 {
                     _hasDragged = true;
                 }
-                int newX = _dragStartLocation.X + dx;
-                int newY = _dragStartLocation.Y + dy;
+                int targetX = _dragStartLocation.X + dx;
+                int targetY = _dragStartLocation.Y + dy;
+
+                // Clamp to screen WorkingArea so the widget can NEVER be dragged behind/under the taskbar or off-screen
+                Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+                int minX = workArea.Left;
+                int maxX = Math.Max(minX, workArea.Right - Width);
+                int minY = workArea.Top;
+                int maxY = Math.Max(minY, workArea.Bottom - Height);
+
+                int newX = Math.Max(minX, Math.Min(maxX, targetX));
+                int newY = Math.Max(minY, Math.Min(maxY, targetY));
+
                 Location = new Point(newX, newY);
                 SetWindowPos(Handle, HWND_BOTTOM, newX, newY, Width, Height, SWP_NOSIZE | SWP_NOACTIVATE);
                 _config.FreeX = newX;
@@ -810,7 +823,7 @@ namespace TaskbarMediaWidget
             // Track info header
             string trackHeader = "🎵 " + (_engine.CurrentInfo.HasTrack
                 ? (_engine.CurrentInfo.Artist + " — " + _engine.CurrentInfo.Title)
-                : "Нет воспроизведения");
+                : Loc.NoPlayback);
 
             ToolStripMenuItem headerItem = new ToolStripMenuItem(trackHeader);
             headerItem.Enabled = false;
@@ -818,9 +831,9 @@ namespace TaskbarMediaWidget
             menu.Items.Add(headerItem);
             menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem prevItem = new ToolStripMenuItem("⏮  Предыдущий трек", null, (s, e) => _engine.PrevTrack());
-            ToolStripMenuItem playItem = new ToolStripMenuItem(_engine.CurrentInfo.IsPlaying ? "⏸  Пауза" : "▶  Воспроизведение", null, (s, e) => _engine.TogglePlayPause());
-            ToolStripMenuItem nextItem = new ToolStripMenuItem("⏭  Следующий трек", null, (s, e) => _engine.NextTrack());
+            ToolStripMenuItem prevItem = new ToolStripMenuItem(Loc.PrevTrack, null, (s, e) => _engine.PrevTrack());
+            ToolStripMenuItem playItem = new ToolStripMenuItem(_engine.CurrentInfo.IsPlaying ? Loc.Pause : Loc.Play, null, (s, e) => _engine.TogglePlayPause());
+            ToolStripMenuItem nextItem = new ToolStripMenuItem(Loc.NextTrack, null, (s, e) => _engine.NextTrack());
             menu.Items.Add(prevItem);
             menu.Items.Add(playItem);
             menu.Items.Add(nextItem);
@@ -828,7 +841,7 @@ namespace TaskbarMediaWidget
             menu.Items.Add(new ToolStripSeparator());
 
             // 1. Режимы отображения (Toggle "Свободный режим")
-            ToolStripMenuItem freeModeItem = new ToolStripMenuItem("📌  Свободный режим (Desktop)", null, (s, e) =>
+            ToolStripMenuItem freeModeItem = new ToolStripMenuItem(Loc.FreeMode, null, (s, e) =>
             {
                 bool newState = !_config.IsFreeMode;
                 ((ToolStripMenuItem)s).Checked = newState;
@@ -837,14 +850,14 @@ namespace TaskbarMediaWidget
             freeModeItem.Checked = _config.IsFreeMode;
             menu.Items.Add(freeModeItem);
 
-            ToolStripMenuItem compactModeItem = new ToolStripMenuItem("🔲  Компактный режим", null, (s, e) => ToggleMode());
+            ToolStripMenuItem compactModeItem = new ToolStripMenuItem(Loc.CompactMode, null, (s, e) => ToggleMode());
             compactModeItem.Checked = _config.IsCompactMode;
             menu.Items.Add(compactModeItem);
 
             menu.Items.Add(new ToolStripSeparator());
 
             // 2. Настройка шрифта
-            ToolStripMenuItem fontItem = new ToolStripMenuItem("🔤  Настройка шрифта...", null, (s, e) => OpenFontDialog());
+            ToolStripMenuItem fontItem = new ToolStripMenuItem(Loc.FontSettings, null, (s, e) => OpenFontDialog());
             menu.Items.Add(fontItem);
 
             // 3. Прозрачность (Slider 10% - 100%)
@@ -853,7 +866,7 @@ namespace TaskbarMediaWidget
 
             menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem wheelItem = new ToolStripMenuItem("🔊  Громкость колесиком мыши", null, (s, e) =>
+            ToolStripMenuItem wheelItem = new ToolStripMenuItem(Loc.VolumeWheel, null, (s, e) =>
             {
                 _config.EnableVolumeWheel = !_config.EnableVolumeWheel;
                 _config.Save();
@@ -861,7 +874,7 @@ namespace TaskbarMediaWidget
             wheelItem.Checked = _config.EnableVolumeWheel;
             menu.Items.Add(wheelItem);
 
-            ToolStripMenuItem autoStartItem = new ToolStripMenuItem("🚀  Автозапуск с Windows", null, (s, e) =>
+            ToolStripMenuItem autoStartItem = new ToolStripMenuItem(Loc.AutoStart, null, (s, e) =>
             {
                 _config.AutoStart = !_config.AutoStart;
                 _config.Save();
@@ -869,12 +882,13 @@ namespace TaskbarMediaWidget
             autoStartItem.Checked = _config.AutoStart;
             menu.Items.Add(autoStartItem);
 
-            ToolStripMenuItem resetPosItem = new ToolStripMenuItem("🎯  Выровнять виджет", null, (s, e) =>
+            ToolStripMenuItem resetPosItem = new ToolStripMenuItem(Loc.ResetPosition, null, (s, e) =>
             {
                 if (_config.IsFreeMode)
                 {
-                    _config.FreeX = (Screen.PrimaryScreen.Bounds.Width - Width) / 2;
-                    _config.FreeY = 100;
+                    Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+                    _config.FreeX = Math.Max(wa.Left, (wa.Width - Width) / 2);
+                    _config.FreeY = Math.Max(wa.Top, wa.Top + 100);
                     _config.Save();
                     Location = new Point(_config.FreeX, _config.FreeY);
                     SetWindowPos(Handle, HWND_BOTTOM, _config.FreeX, _config.FreeY, Width, Height, SWP_NOSIZE | SWP_NOACTIVATE);
@@ -889,7 +903,35 @@ namespace TaskbarMediaWidget
 
             menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem githubItem = new ToolStripMenuItem("🐙  GitHub (@darquead)", null, (s, e) =>
+            // 4. Переключение языка (Language Switcher)
+            ToolStripMenuItem langMenu = new ToolStripMenuItem(Loc.LanguageMenu);
+            ToolStripMenuItem langRuItem = new ToolStripMenuItem(Loc.LangRu, null, (s, e) =>
+            {
+                _config.Language = "ru";
+                Loc.CurrentLanguage = "ru";
+                _config.Save();
+                Redraw();
+                if (OnLanguageChanged != null) OnLanguageChanged();
+            });
+            langRuItem.Checked = Loc.IsRussian;
+
+            ToolStripMenuItem langEnItem = new ToolStripMenuItem(Loc.LangEn, null, (s, e) =>
+            {
+                _config.Language = "en";
+                Loc.CurrentLanguage = "en";
+                _config.Save();
+                Redraw();
+                if (OnLanguageChanged != null) OnLanguageChanged();
+            });
+            langEnItem.Checked = !Loc.IsRussian;
+
+            langMenu.DropDownItems.Add(langRuItem);
+            langMenu.DropDownItems.Add(langEnItem);
+            menu.Items.Add(langMenu);
+
+            menu.Items.Add(new ToolStripSeparator());
+
+            ToolStripMenuItem githubItem = new ToolStripMenuItem(Loc.GitHubLink, null, (s, e) =>
             {
                 try
                 {
@@ -899,7 +941,7 @@ namespace TaskbarMediaWidget
             });
             menu.Items.Add(githubItem);
 
-            ToolStripMenuItem exitItem = new ToolStripMenuItem("❌  Закрыть виджет", null, (s, e) => Application.Exit());
+            ToolStripMenuItem exitItem = new ToolStripMenuItem(Loc.Exit, null, (s, e) => Application.Exit());
             menu.Items.Add(exitItem);
 
             return menu;
@@ -1120,7 +1162,7 @@ namespace TaskbarMediaWidget
                             }
                             else
                             {
-                                displayText = "Нет воспроизведения";
+                                displayText = Loc.NoPlayback;
                                 textColor = Color.FromArgb(145, 145, 150);
                             }
 
@@ -1291,7 +1333,7 @@ namespace TaskbarMediaWidget
 
             Label lbl = new Label
             {
-                Text = "👁  Прозрачность: " + initialPercent + "%",
+                Text = Loc.OpacityLabel(initialPercent),
                 ForeColor = Color.FromArgb(235, 235, 240),
                 Font = new Font("Segoe UI", 9f, FontStyle.Regular),
                 Dock = DockStyle.Top,
@@ -1314,7 +1356,7 @@ namespace TaskbarMediaWidget
 
             tb.ValueChanged += (s, e) =>
             {
-                lbl.Text = "👁  Прозрачность: " + tb.Value + "%";
+                lbl.Text = Loc.OpacityLabel(tb.Value);
                 if (onValueChanged != null) onValueChanged(tb.Value);
             };
 

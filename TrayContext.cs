@@ -32,7 +32,7 @@ namespace TaskbarMediaWidget
             _trayIcon = new NotifyIcon();
             _currentIcon = GenerateTrayIcon(_engine.CurrentInfo.IsPlaying);
             _trayIcon.Icon = _currentIcon;
-            _trayIcon.Text = "Медиаплеер на панели задач";
+            _trayIcon.Text = Loc.AppTitle;
             _trayIcon.Visible = true;
             Program.Log("TrayIcon visible");
 
@@ -46,7 +46,23 @@ namespace TaskbarMediaWidget
             };
             _trayIcon.DoubleClick += (s, e) => _engine.ActivatePlayerWindow();
 
+            _form.OnLanguageChanged += () =>
+            {
+                UpdateTrayText();
+            };
+
             _engine.OnMediaChanged += () =>
+            {
+                UpdateTrayText();
+                UpdateTrayIcon(_engine.CurrentInfo.IsPlaying);
+            };
+
+            Program.Log("TrayContext ctor completed");
+        }
+
+        private void UpdateTrayText()
+        {
+            try
             {
                 if (_engine.CurrentInfo.HasTrack)
                 {
@@ -56,13 +72,10 @@ namespace TaskbarMediaWidget
                 }
                 else
                 {
-                    _trayIcon.Text = "Медиаплеер на панели задач";
+                    _trayIcon.Text = Loc.AppTitle;
                 }
-
-                UpdateTrayIcon(_engine.CurrentInfo.IsPlaying);
-            };
-
-            Program.Log("TrayContext ctor completed");
+            }
+            catch { }
         }
 
         private void UpdateTrayIcon(bool isPlaying)

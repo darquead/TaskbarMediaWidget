@@ -22,6 +22,7 @@ namespace TaskbarMediaWidget
         public float FontSize { get; set; }
         public bool FontBold { get; set; }
         public bool FontItalic { get; set; }
+        public string Language { get; set; }
 
         public Config()
         {
@@ -37,6 +38,10 @@ namespace TaskbarMediaWidget
             FontSize = 10.2f;
             FontBold = false;
             FontItalic = false;
+
+            string sysLang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.ToLowerInvariant();
+            Language = (sysLang == "ru" || sysLang == "be" || sysLang == "uk") ? "ru" : "en";
+            Loc.CurrentLanguage = Language;
         }
 
         public static string GetDataDirectory()
@@ -138,6 +143,13 @@ namespace TaskbarMediaWidget
                             bool b;
                             if (bool.TryParse(val, out b)) cfg.FontItalic = b;
                         }
+                        else if (string.Equals(key, "Language", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.IsNullOrEmpty(val))
+                            {
+                                cfg.Language = string.Equals(val, "en", StringComparison.OrdinalIgnoreCase) ? "en" : "ru";
+                            }
+                        }
                     }
                 }
                 catch
@@ -151,6 +163,7 @@ namespace TaskbarMediaWidget
                 cfg.Save();
             }
 
+            Loc.CurrentLanguage = cfg.Language ?? "ru";
             return cfg;
         }
 
@@ -161,6 +174,7 @@ namespace TaskbarMediaWidget
                 string path = GetConfigPath();
                 StringBuilder sb = new StringBuilder();
                 sb.AppendLine("# TaskbarMediaWidget Configuration");
+                sb.AppendLine("Language=" + (Language ?? "ru"));
                 sb.AppendLine("CompactMode=" + IsCompactMode);
                 sb.AppendLine("EnableVolumeWheel=" + EnableVolumeWheel);
                 sb.AppendLine("MarginGap=" + MarginGap);

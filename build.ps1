@@ -20,6 +20,7 @@ $arguments = @(
     "/codepage:65001",
     "/win32manifest:$root\app.manifest",
     "/out:$dist\TaskbarMediaWidget.exe",
+    "$root\Localization.cs",
     "$root\Config.cs",
     "$root\MediaEngine.cs",
     "$root\AppVolumeManager.cs",

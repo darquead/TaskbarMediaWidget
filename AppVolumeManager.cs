@@ -324,7 +324,7 @@ namespace TaskbarMediaWidget
                     Guid ctx = Guid.Empty;
                     epVol.SetMasterVolumeLevelScalar(newMaster, ref ctx);
                     int percent = (int)Math.Round(newMaster * 100);
-                    return string.Format("Система: {0}%", percent);
+                    return Loc.SystemVolume(percent);
                 }
             }
             catch { }
@@ -334,7 +334,7 @@ namespace TaskbarMediaWidget
 
         private static string FallbackMaster(int delta)
         {
-            return delta > 0 ? "Громкость +" : "Громкость -";
+            return delta > 0 ? Loc.VolumeUp : Loc.VolumeDown;
         }
     }
 }
