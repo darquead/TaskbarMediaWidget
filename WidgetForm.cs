@@ -213,23 +213,17 @@ namespace TaskbarMediaWidget
 
         private void InitFonts()
         {
-            // Register Inter font file if present
+            // Register local portable Inter font files if present in the application's fonts folder
             try
             {
                 string appDir = AppDomain.CurrentDomain.BaseDirectory;
-                string[] candidatePaths = new string[]
+                string fontsDir = Path.Combine(appDir, "fonts");
+                if (Directory.Exists(fontsDir))
                 {
-                    Path.Combine(appDir, "fonts", "Inter-Regular.ttf"),
-                    Path.Combine(Path.GetDirectoryName(appDir.TrimEnd('\\', '/')), "fonts", "Inter-Regular.ttf"),
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "Windows", "Fonts", "Inter-Regular.ttf"),
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts", "Inter-Regular.ttf")
-                };
-
-                foreach (string path in candidatePaths)
-                {
-                    if (File.Exists(path))
+                    string[] fontFiles = Directory.GetFiles(fontsDir, "*.ttf");
+                    foreach (string fontFile in fontFiles)
                     {
-                        AddFontResourceEx(path, FR_PRIVATE, IntPtr.Zero);
+                        AddFontResourceEx(fontFile, FR_PRIVATE, IntPtr.Zero);
                     }
                 }
             }
@@ -894,6 +888,16 @@ namespace TaskbarMediaWidget
             menu.Items.Add(resetPosItem);
 
             menu.Items.Add(new ToolStripSeparator());
+
+            ToolStripMenuItem githubItem = new ToolStripMenuItem("🐙  GitHub (@darquead)", null, (s, e) =>
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://github.com/darquead") { UseShellExecute = true });
+                }
+                catch { }
+            });
+            menu.Items.Add(githubItem);
 
             ToolStripMenuItem exitItem = new ToolStripMenuItem("❌  Закрыть виджет", null, (s, e) => Application.Exit());
             menu.Items.Add(exitItem);

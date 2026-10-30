@@ -28,7 +28,7 @@ namespace TaskbarMediaWidget
             IsCompactMode = false;
             EnableVolumeWheel = true;
             MarginGap = 8;
-            AutoStart = true;
+            AutoStart = false;
             IsFreeMode = false;
             FreeX = 100;
             FreeY = 100;
@@ -41,27 +41,8 @@ namespace TaskbarMediaWidget
 
         public static string GetDataDirectory()
         {
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string localConfig = Path.Combine(baseDir, "config.ini");
-
-            // 1. If local config exists, use application folder (portable mode)
-            if (File.Exists(localConfig)) return baseDir;
-
-            // 2. Check if application folder is writable
-            try
-            {
-                string testFile = Path.Combine(baseDir, ".write_test_" + Guid.NewGuid().ToString("N"));
-                File.WriteAllText(testFile, "test");
-                File.Delete(testFile);
-                return baseDir; // Writable -> Portable mode by default
-            }
-            catch
-            {
-                // 3. Read-only location (e.g. Program Files) -> Fallback to %APPDATA%\TaskbarMediaWidget
-                string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppName);
-                if (!Directory.Exists(appData)) Directory.CreateDirectory(appData);
-                return appData;
-            }
+            // Strict portable mode: strictly use the application folder only. Never touch %APPDATA% or system paths.
+            return AppDomain.CurrentDomain.BaseDirectory;
         }
 
         public static string GetConfigPath()
@@ -165,8 +146,8 @@ namespace TaskbarMediaWidget
             }
             else
             {
-                // First run: save defaults and ensure autostart is registered
-                cfg.AutoStart = true;
+                // First run: save defaults (portable: AutoStart is false by default, no registry trace)
+                cfg.AutoStart = false;
                 cfg.Save();
             }
 
@@ -194,7 +175,12 @@ namespace TaskbarMediaWidget
                 sb.AppendLine("FontItalic=" + FontItalic);
                 File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
 
-                SetAutoStart(AutoStart);
+                // Only touch registry if setting differs from current system state
+                bool currentAuto = IsAutoStartEnabled();
+                if (AutoStart != currentAuto)
+                {
+                    SetAutoStart(AutoStart);
+                }
             }
             catch
             {
