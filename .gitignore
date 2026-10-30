@@ -1,0 +1,23 @@
+# Build outputs and user runtime files
+*.log
+*.log.old
+*.tmp
+*.bak
+config.ini
+
+# Dist runtime files
+dist/*.log*
+dist/config.ini
+
+# Visual Studio / IDE files
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Windows OS generated
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
