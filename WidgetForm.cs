@@ -72,6 +72,12 @@ namespace TaskbarMediaWidget
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -451,8 +457,21 @@ namespace TaskbarMediaWidget
 
         private bool IsFullscreenAppRunning(IntPtr hTray, RECT trayRect)
         {
+            // If mouse cursor is currently over taskbar or widget, user wants to interact with it!
+            Point mousePos = Cursor.Position;
+            if (mousePos.X >= trayRect.Left && mousePos.X <= trayRect.Right &&
+                mousePos.Y >= trayRect.Top && mousePos.Y <= trayRect.Bottom)
+            {
+                return false;
+            }
+            if (Bounds.Contains(mousePos))
+            {
+                return false;
+            }
+
             IntPtr fg = GetForegroundWindow();
             if (fg == IntPtr.Zero || fg == hTray || fg == Handle) return false;
+            if (IsIconic(fg)) return false;
 
             uint fgPid;
             GetWindowThreadProcessId(fg, out fgPid);
@@ -464,7 +483,7 @@ namespace TaskbarMediaWidget
             GetClassName(fg, cls, 256);
             string clsName = cls.ToString();
 
-            // Shell, Start Menu, Search, Notification Center, Desktops must never hide the widget
+            // Shell, Start Menu, Search, Notification Center, Desktops must never hide or demote the widget
             if (clsName == "WorkerW" || clsName == "Progman" ||
                 clsName == "Shell_TrayWnd" || clsName == "Shell_SecondaryTrayWnd" ||
                 clsName == "Windows.UI.Core.CoreWindow" ||
@@ -474,7 +493,8 @@ namespace TaskbarMediaWidget
                 clsName == "Shell_InputSwitchTopLevelWindow" ||
                 clsName == "ControlCenterWindow" ||
                 clsName == "ActionCenter" || clsName == "NotificationCenter" ||
-                clsName == "PopupHost" || clsName == "DV2ControlHost")
+                clsName == "PopupHost" || clsName == "DV2ControlHost" ||
+                clsName == "Windows.UI.Input.InputSite.WindowClass")
             {
                 return false;
             }
@@ -487,7 +507,12 @@ namespace TaskbarMediaWidget
                     if (pName == "explorer" ||
                         pName == "startmenuexperiencehost" ||
                         pName == "shellexperiencehost" ||
+                        pName == "shellhost" ||
+                        pName == "sihost" ||
                         pName == "searchhost" ||
+                        pName == "applicationframehost" ||
+                        pName == "taskhostw" ||
+                        pName == "dwm" ||
                         pName == "taskbarmediawidget" ||
                         pName == "systemsettings" ||
                         pName == "lockapp" ||
@@ -504,10 +529,10 @@ namespace TaskbarMediaWidget
 
             RECT fgRect;
             GetWindowRect(fg, out fgRect);
-            int screenW = Screen.PrimaryScreen.Bounds.Width;
-            int screenH = Screen.PrimaryScreen.Bounds.Height;
+            Rectangle screenBounds = Screen.FromHandle(Handle).Bounds;
 
-            bool coversScreen = (fgRect.Left <= 0 && fgRect.Top <= 0 && fgRect.Right >= screenW && fgRect.Bottom >= screenH);
+            bool coversScreen = (fgRect.Left <= screenBounds.Left && fgRect.Top <= screenBounds.Top &&
+                                 fgRect.Right >= screenBounds.Right && fgRect.Bottom >= screenBounds.Bottom);
             bool coversTaskbar = (fgRect.Left <= trayRect.Left && fgRect.Top <= trayRect.Top &&
                                   fgRect.Right >= trayRect.Right && fgRect.Bottom >= trayRect.Bottom);
 
@@ -557,7 +582,8 @@ namespace TaskbarMediaWidget
             // Fullscreen application check (ignores Start Menu, Explorer, and shell popups)
             if (IsFullscreenAppRunning(hTray, trayRect))
             {
-                if (Visible) ShowWindow(Handle, 0); // SW_HIDE
+                // Step down to HWND_NOTOPMOST so widget stays behind the fullscreen app without destroying visibility or click handlers!
+                SetWindowPos(Handle, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                 return;
             }
 
@@ -618,7 +644,11 @@ namespace TaskbarMediaWidget
                 }
             }
 
-            if (!Visible) ShowWindow(Handle, 8); // SW_SHOWNA
+            // Always ensure the window is visible in Win32
+            if (!IsWindowVisible(Handle))
+            {
+                ShowWindow(Handle, 8); // SW_SHOWNA
+            }
 
             bool posChanged = (Left != targetX || Top != targetY);
 
@@ -638,7 +668,7 @@ namespace TaskbarMediaWidget
             }
             else if (notTopmost || mouseOver)
             {
-                SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
         }
 
@@ -690,7 +720,7 @@ namespace TaskbarMediaWidget
                 IntPtr prevWnd = GetWindow(Handle, GW_HWNDPREV);
                 if (prevWnd != IntPtr.Zero)
                 {
-                    SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                    SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 }
             }
 
@@ -732,7 +762,7 @@ namespace TaskbarMediaWidget
         {
             if (!_config.IsFreeMode)
             {
-                SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
 
             if (e.Button == MouseButtons.Left)

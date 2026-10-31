@@ -80,7 +80,16 @@ namespace TaskbarMediaWidget
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool CloseDesktop(IntPtr hDesktop);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        private const int WM_APPCOMMAND = 0x0319;
+        private const int APPCOMMAND_MEDIA_NEXTTRACK = 11;
+        private const int APPCOMMAND_MEDIA_PREVIOUSTRACK = 12;
+        private const int APPCOMMAND_MEDIA_STOP = 13;
+        private const int APPCOMMAND_MEDIA_PLAY_PAUSE = 14;
 
         private const byte VK_VOLUME_MUTE = 0xAD;
         private const byte VK_VOLUME_DOWN = 0xAE;
@@ -238,7 +247,7 @@ namespace TaskbarMediaWidget
                     {
                         try
                         {
-                            dynamic session = _sessionManager.GetCurrentSession();
+                            dynamic session = GetActiveSession();
                             _currentSession = session;
 
                             if (session != null)
@@ -307,20 +316,98 @@ namespace TaskbarMediaWidget
             });
         }
 
+        private dynamic GetActiveSession()
+        {
+            if (_sessionManager == null) return _currentSession;
+
+            try
+            {
+                dynamic cur = _sessionManager.GetCurrentSession();
+                if (cur != null) return cur;
+            }
+            catch { }
+
+            try
+            {
+                dynamic sessions = _sessionManager.GetSessions();
+                if (sessions != null)
+                {
+                    dynamic bestSession = null;
+                    foreach (dynamic s in sessions)
+                    {
+                        if (s == null) continue;
+                        try
+                        {
+                            dynamic playback = s.GetPlaybackInfo();
+                            if (playback != null)
+                            {
+                                int statusVal = (int)playback.PlaybackStatus;
+                                if (statusVal == 4) // Playing
+                                {
+                                    return s;
+                                }
+                                if (statusVal == 5 && bestSession == null) // Paused
+                                {
+                                    bestSession = s;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                    if (bestSession != null) return bestSession;
+
+                    foreach (dynamic s in sessions)
+                    {
+                        if (s != null) return s;
+                    }
+                }
+            }
+            catch { }
+
+            return _currentSession;
+        }
+
+        private void SendMediaCommand(int appCommand, byte vk)
+        {
+            // 1. Try sending directly to Spotify or media player window (bypasses UIPI when elevated game is active)
+            try
+            {
+                EnumWindows((hWnd, lParam) =>
+                {
+                    if (IsWindowVisible(hWnd))
+                    {
+                        uint pid;
+                        GetWindowThreadProcessId(hWnd, out pid);
+                        if (pid != 0)
+                        {
+                            try
+                            {
+                                using (Process p = Process.GetProcessById((int)pid))
+                                {
+                                    string pName = p.ProcessName.ToLowerInvariant();
+                                    if (pName == "spotify")
+                                    {
+                                        SendMessage(hWnd, (uint)WM_APPCOMMAND, hWnd, (IntPtr)(appCommand << 16));
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+
+            // 2. Broadcast synthetic key event as universal fallback
+            SendKey(vk);
+        }
+
         public void TogglePlayPause()
         {
             Program.Log("TogglePlayPause requested");
             bool handled = false;
-            dynamic session = null;
-            if (_sessionManager != null)
-            {
-                try
-                {
-                    session = _sessionManager.GetCurrentSession();
-                }
-                catch { }
-            }
-            if (session == null) session = _currentSession;
+            dynamic session = GetActiveSession();
 
             if (session != null)
             {
@@ -338,8 +425,8 @@ namespace TaskbarMediaWidget
 
             if (!handled)
             {
-                Program.Log("TogglePlayPause executed via VK_MEDIA_PLAY_PAUSE");
-                SendKey(VK_MEDIA_PLAY_PAUSE);
+                Program.Log("TogglePlayPause executed via fallback");
+                SendMediaCommand(APPCOMMAND_MEDIA_PLAY_PAUSE, VK_MEDIA_PLAY_PAUSE);
             }
 
             // Immediately toggle visual state predictively for instant feedback
@@ -367,16 +454,7 @@ namespace TaskbarMediaWidget
         {
             Program.Log("NextTrack requested");
             bool handled = false;
-            dynamic session = null;
-            if (_sessionManager != null)
-            {
-                try
-                {
-                    session = _sessionManager.GetCurrentSession();
-                }
-                catch { }
-            }
-            if (session == null) session = _currentSession;
+            dynamic session = GetActiveSession();
 
             if (session != null)
             {
@@ -394,8 +472,8 @@ namespace TaskbarMediaWidget
 
             if (!handled)
             {
-                Program.Log("NextTrack executed via VK_MEDIA_NEXT_TRACK");
-                SendKey(VK_MEDIA_NEXT_TRACK);
+                Program.Log("NextTrack executed via fallback");
+                SendMediaCommand(APPCOMMAND_MEDIA_NEXTTRACK, VK_MEDIA_NEXT_TRACK);
             }
 
             Timer t = null;
@@ -410,16 +488,7 @@ namespace TaskbarMediaWidget
         {
             Program.Log("PrevTrack requested");
             bool handled = false;
-            dynamic session = null;
-            if (_sessionManager != null)
-            {
-                try
-                {
-                    session = _sessionManager.GetCurrentSession();
-                }
-                catch { }
-            }
-            if (session == null) session = _currentSession;
+            dynamic session = GetActiveSession();
 
             if (session != null)
             {
@@ -437,8 +506,8 @@ namespace TaskbarMediaWidget
 
             if (!handled)
             {
-                Program.Log("PrevTrack executed via VK_MEDIA_PREV_TRACK");
-                SendKey(VK_MEDIA_PREV_TRACK);
+                Program.Log("PrevTrack executed via fallback");
+                SendMediaCommand(APPCOMMAND_MEDIA_PREVIOUSTRACK, VK_MEDIA_PREV_TRACK);
             }
 
             Timer t = null;
