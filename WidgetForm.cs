@@ -78,6 +78,38 @@ namespace TaskbarMediaWidget
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSLLHOOKSTRUCT
+        {
+            public POINT pt;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public UIntPtr dwExtraInfo;
+        }
+
+        private const int WH_MOUSE_LL = 14;
+        private const int WM_MOUSEMOVE = 0x0200;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_LBUTTONUP = 0x0202;
+        private const int WM_RBUTTONDOWN = 0x0204;
+        private const int WM_RBUTTONUP = 0x0205;
+        private const int WM_MOUSEWHEEL = 0x020A;
+
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -149,6 +181,9 @@ namespace TaskbarMediaWidget
         private Font _iconFont;
         private Font _textFont;
 
+        private IntPtr _mouseHook = IntPtr.Zero;
+        private LowLevelMouseProc _mouseHookProc;
+
         public WidgetForm(MediaEngine engine, Config config)
         {
             _engine = engine;
@@ -164,6 +199,21 @@ namespace TaskbarMediaWidget
             Size = new Size(initialWidth, WIDGET_HEIGHT);
 
             InitFonts();
+
+            _mouseHookProc = MouseHookCallback;
+            try
+            {
+                using (Process curProcess = Process.GetCurrentProcess())
+                using (ProcessModule curModule = curProcess.MainModule)
+                {
+                    _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseHookProc, GetModuleHandle(curModule.ModuleName), 0);
+                }
+                Program.Log("MouseHook installed: " + (_mouseHook != IntPtr.Zero));
+            }
+            catch (Exception ex)
+            {
+                Program.Log("MouseHook install error: " + ex.Message);
+            }
 
             _engine.OnMediaChanged += OnMediaInfoChanged;
 
@@ -198,6 +248,69 @@ namespace TaskbarMediaWidget
             };
 
             Redraw();
+        }
+
+        private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && Visible)
+            {
+                int msg = (int)wParam;
+                if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+                    msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MOUSEWHEEL)
+                {
+                    MSLLHOOKSTRUCT s = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+                    Point screenPt = new Point(s.pt.x, s.pt.y);
+                    Rectangle b = Bounds;
+
+                    if (b.Contains(screenPt))
+                    {
+                        Point clientPt = new Point(screenPt.X - Left, screenPt.Y - Top);
+
+                        if (msg == WM_LBUTTONDOWN)
+                        {
+                            HandleMouseDown(new MouseEventArgs(MouseButtons.Left, 1, clientPt.X, clientPt.Y, 0));
+                            return (IntPtr)1;
+                        }
+                        else if (msg == WM_LBUTTONUP)
+                        {
+                            OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, clientPt.X, clientPt.Y, 0));
+                            return (IntPtr)1;
+                        }
+                        else if (msg == WM_RBUTTONDOWN)
+                        {
+                            ShowContextMenu(clientPt);
+                            return (IntPtr)1;
+                        }
+                        else if (msg == WM_MOUSEWHEEL)
+                        {
+                            if (_config.EnableVolumeWheel)
+                            {
+                                short delta = (short)((s.mouseData >> 16) & 0xFFFF);
+                                OnMouseWheel(new MouseEventArgs(MouseButtons.None, 0, clientPt.X, clientPt.Y, delta));
+                                return (IntPtr)1;
+                            }
+                        }
+                        else if (msg == WM_MOUSEMOVE)
+                        {
+                            int newIdx = GetButtonIndexAt(clientPt);
+                            if (newIdx != _hoverIndex)
+                            {
+                                _hoverIndex = newIdx;
+                                if (_hoverIndex != 3) _marqueeOffset = 0;
+                                Redraw();
+                            }
+                        }
+                    }
+                    else if (msg == WM_MOUSEMOVE && _hoverIndex != -1)
+                    {
+                        _hoverIndex = -1;
+                        _pressedIndex = -1;
+                        _marqueeOffset = 0;
+                        Redraw();
+                    }
+                }
+            }
+            return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         }
 
         protected override void OnShown(EventArgs e)
@@ -582,8 +695,6 @@ namespace TaskbarMediaWidget
             // Fullscreen application check (ignores Start Menu, Explorer, and shell popups)
             if (IsFullscreenAppRunning(hTray, trayRect))
             {
-                // Step down to HWND_NOTOPMOST so widget stays behind the fullscreen app without destroying visibility or click handlers!
-                SetWindowPos(Handle, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                 return;
             }
 
@@ -1296,6 +1407,11 @@ namespace TaskbarMediaWidget
 
         protected override void Dispose(bool disposing)
         {
+            if (_mouseHook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_mouseHook);
+                _mouseHook = IntPtr.Zero;
+            }
             if (disposing)
             {
                 if (_pollTimer != null) { _pollTimer.Stop(); _pollTimer.Dispose(); }
