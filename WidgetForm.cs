@@ -269,7 +269,7 @@ namespace TaskbarMediaWidget
                         if (msg == WM_MOUSEMOVE)
                         {
                             HandleDragMove(screenPt);
-                            return (IntPtr)1;
+                            // CRITICAL: Do NOT return (IntPtr)1 on WM_MOUSEMOVE, otherwise Windows freezes the mouse cursor!
                         }
                         else if (msg == WM_LBUTTONUP)
                         {
@@ -811,6 +811,7 @@ namespace TaskbarMediaWidget
             {
                 Location = new Point(targetX, targetY);
                 SetWindowPos(Handle, HWND_TOPMOST, targetX, targetY, Width, Height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                Redraw();
             }
             else if (notTopmost || mouseOver)
             {
@@ -858,7 +859,7 @@ namespace TaskbarMediaWidget
             }
         }
 
-        private void HandleDragMove(Point currentCursor)
+        internal void HandleDragMove(Point currentCursor)
         {
             int dx = currentCursor.X - _dragStartCursor.X;
             int dy = currentCursor.Y - _dragStartCursor.Y;
@@ -886,15 +887,33 @@ namespace TaskbarMediaWidget
                 SetWindowPos(Handle, HWND_BOTTOM, newX, newY, Width, Height, SWP_NOSIZE | SWP_NOACTIVATE);
                 _config.FreeX = newX;
                 _config.FreeY = newY;
+                Redraw();
             }
             else
             {
                 // Dragging along the Windows Taskbar
                 IntPtr hTray = FindWindow("Shell_TrayWnd", null);
-                if (hTray == IntPtr.Zero) return;
+                RECT trayRect = new RECT();
+                bool hasTray = false;
+                if (hTray != IntPtr.Zero)
+                {
+                    hasTray = GetWindowRect(hTray, out trayRect);
+                }
 
-                RECT trayRect;
-                GetWindowRect(hTray, out trayRect);
+                Screen currentScreen = Screen.FromPoint(currentCursor);
+                if (!hasTray || (trayRect.Right - trayRect.Left <= 0))
+                {
+                    trayRect.Left = currentScreen.Bounds.Left;
+                    trayRect.Right = currentScreen.Bounds.Right;
+                    trayRect.Top = currentScreen.WorkingArea.Bottom;
+                    trayRect.Bottom = currentScreen.Bounds.Bottom;
+                    if (trayRect.Bottom <= trayRect.Top)
+                    {
+                        trayRect.Top = currentScreen.Bounds.Bottom - 48;
+                        trayRect.Bottom = currentScreen.Bounds.Bottom;
+                    }
+                }
+
                 int trayHeight = trayRect.Bottom - trayRect.Top;
                 int trayWidth = trayRect.Right - trayRect.Left;
                 bool isVertical = (trayHeight > trayWidth);
@@ -912,6 +931,7 @@ namespace TaskbarMediaWidget
 
                     _config.TaskbarCustomX = clampedX;
                     _config.HasCustomTaskbarPos = true;
+                    Redraw();
                 }
                 else
                 {
@@ -926,6 +946,7 @@ namespace TaskbarMediaWidget
 
                     _config.TaskbarCustomY = clampedY;
                     _config.HasCustomTaskbarPos = true;
+                    Redraw();
                 }
             }
         }
@@ -954,7 +975,7 @@ namespace TaskbarMediaWidget
             HandleMouseDown(e);
         }
 
-        private void HandleMouseDown(MouseEventArgs e)
+        internal void HandleMouseDown(MouseEventArgs e)
         {
             if (!_config.IsFreeMode)
             {
@@ -965,29 +986,15 @@ namespace TaskbarMediaWidget
             {
                 int index = GetButtonIndexAt(e.Location);
                 _pressedIndex = index;
-                Program.Log("Widget Click: index=" + index + " at " + e.Location);
+                Program.Log("Widget MouseDown: index=" + index + " at " + e.Location);
                 Redraw();
 
-                if (index == 0)
-                {
-                    _engine.PrevTrack();
-                }
-                else if (index == 1)
-                {
-                    _engine.TogglePlayPause();
-                }
-                else if (index == 2)
-                {
-                    _engine.NextTrack();
-                }
-                else if (index == 3 || index == -1)
-                {
-                    // Allow dragging in both Free Desktop mode and Taskbar mode
-                    _isDragging = true;
-                    _dragStartCursor = Cursor.Position;
-                    _dragStartLocation = Location;
-                    _hasDragged = false;
-                }
+                // Allow dragging from ANY point on the widget (works in both Full and Compact mode)
+                _isDragging = true;
+                _dragStartCursor = Cursor.Position;
+                _dragStartLocation = Location;
+                _hasDragged = false;
+                Program.Log("Drag started: startCursor=" + _dragStartCursor + ", startLocation=" + _dragStartLocation);
             }
             else if (e.Button == MouseButtons.Right)
             {
@@ -1004,7 +1011,7 @@ namespace TaskbarMediaWidget
             }
         }
 
-        private void HandleMouseUp(MouseEventArgs e)
+        internal void HandleMouseUp(MouseEventArgs e)
         {
             if (_isDragging)
             {
@@ -1012,12 +1019,30 @@ namespace TaskbarMediaWidget
                 if (_hasDragged)
                 {
                     _config.Save();
+                    Program.Log("Drag finished, saved TaskbarCustomX=" + _config.TaskbarCustomX);
+                    Redraw();
                 }
                 else
                 {
-                    // If user clicked without dragging, open player
-                    if (_pressedIndex == 3 && !_config.IsCompactMode)
+                    // User CLICKED without dragging: perform the clicked button action
+                    if (_pressedIndex == 0)
                     {
+                        Program.Log("Click -> PrevTrack");
+                        _engine.PrevTrack();
+                    }
+                    else if (_pressedIndex == 1)
+                    {
+                        Program.Log("Click -> TogglePlayPause");
+                        _engine.TogglePlayPause();
+                    }
+                    else if (_pressedIndex == 2)
+                    {
+                        Program.Log("Click -> NextTrack");
+                        _engine.NextTrack();
+                    }
+                    else if (_pressedIndex == 3 && !_config.IsCompactMode)
+                    {
+                        Program.Log("Click -> ActivatePlayerWindow");
                         _engine.ActivatePlayerWindow();
                     }
                 }
