@@ -107,6 +107,13 @@ namespace TaskbarMediaWidget
             [PreserveSig] int GetMute(out bool muted);
         }
 
+        public class AudioAppInfo
+        {
+            public string Id { get; set; }
+            public string DisplayName { get; set; }
+            public bool IsActiveAudio { get; set; }
+        }
+
         private class AppSessionInfo
         {
             public uint Pid;
@@ -116,6 +123,117 @@ namespace TaskbarMediaWidget
             public float Volume;
             public bool Muted;
             public ISimpleAudioVolume VolumeCtrl;
+        }
+
+        public static List<AudioAppInfo> GetActiveAudioApps()
+        {
+            List<AudioAppInfo> result = new List<AudioAppInfo>();
+            try
+            {
+                Guid clsid = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+                Guid iid = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
+                object obj;
+                int hr = CoCreateInstance(ref clsid, null, ClsCtxAll, ref iid, out obj);
+                if (hr < 0 || obj == null) return result;
+
+                IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)obj;
+                IMMDevice dev;
+                hr = enumerator.GetDefaultAudioEndpoint(0, 0, out dev);
+                if (hr < 0 || dev == null) return result;
+
+                Guid mgrIid = typeof(IAudioSessionManager2).GUID;
+                object mgrObj;
+                hr = dev.Activate(ref mgrIid, ClsCtxAll, IntPtr.Zero, out mgrObj);
+                if (hr < 0 || mgrObj == null) return result;
+
+                IAudioSessionManager2 mgr = (IAudioSessionManager2)mgrObj;
+                IAudioSessionEnumerator sessionEnum;
+                hr = mgr.GetSessionEnumerator(out sessionEnum);
+                if (hr < 0 || sessionEnum == null) return result;
+
+                int count;
+                sessionEnum.GetCount(out count);
+
+                Dictionary<string, AudioAppInfo> map = new Dictionary<string, AudioAppInfo>(StringComparer.OrdinalIgnoreCase);
+
+                for (int i = 0; i < count; i++)
+                {
+                    IAudioSessionControl ctrl;
+                    if (sessionEnum.GetSession(i, out ctrl) < 0 || ctrl == null) continue;
+
+                    IAudioSessionControl2 ctrl2 = ctrl as IAudioSessionControl2;
+                    IAudioMeterInformation meter = ctrl as IAudioMeterInformation;
+
+                    uint pid = 0;
+                    if (ctrl2 != null) ctrl2.GetProcessId(out pid);
+                    if (pid == 0) continue;
+
+                    int state = 0;
+                    ctrl.GetState(out state);
+                    if (state == 2) continue; // Expired
+
+                    float peak = 0f;
+                    if (meter != null) meter.GetPeakValue(out peak);
+
+                    string pName = "";
+                    string title = "";
+                    try
+                    {
+                        using (Process p = Process.GetProcessById((int)pid))
+                        {
+                            pName = p.ProcessName;
+                            try
+                            {
+                                string desc = p.MainModule.FileVersionInfo.FileDescription;
+                                title = !string.IsNullOrEmpty(desc) ? desc.Trim() : pName;
+                            }
+                            catch
+                            {
+                                title = pName;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    string pLower = pName.ToLowerInvariant();
+                    if (pLower == "explorer" || pLower == "dwm" || pLower == "audiodg" ||
+                        pLower == "taskhostw" || pLower == "shellexperiencehost" ||
+                        pLower == "systemsettings" || pLower == "taskbarmediawidget" ||
+                        pLower == "traymixer" || pLower == "translucenttb" ||
+                        pLower.Contains("wallpaper"))
+                    {
+                        continue;
+                    }
+
+                    AudioAppInfo existing;
+                    if (map.TryGetValue(pName, out existing))
+                    {
+                        if (peak > 0.0001f) existing.IsActiveAudio = true;
+                    }
+                    else
+                    {
+                        map[pName] = new AudioAppInfo
+                        {
+                            Id = pName + ".exe",
+                            DisplayName = title,
+                            IsActiveAudio = (peak > 0.0001f)
+                        };
+                    }
+                }
+
+                foreach (KeyValuePair<string, AudioAppInfo> kvp in map)
+                {
+                    result.Add(kvp.Value);
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.Log("GetActiveAudioApps error: " + ex.Message);
+            }
+            return result;
         }
 
         public static string ChangeVolume(int delta, string mediaAppId)
@@ -212,65 +330,59 @@ namespace TaskbarMediaWidget
                 }
 
                 // Selection criteria:
-                // 1. App actively producing sound output (Peak > 0.0001f)
                 AppSessionInfo chosen = null;
-                AppSessionInfo loudest = null;
-                float maxPeak = 0.0001f;
 
-                foreach (AppSessionInfo s in sessions)
-                {
-                    if (s.Peak > maxPeak)
-                    {
-                        maxPeak = s.Peak;
-                        loudest = s;
-                    }
-                }
-
-                // If mediaAppId is active and has sound, prioritize it
                 if (!string.IsNullOrEmpty(mediaAppId))
                 {
+                    // Target application mode: STRICTLY modify ONLY the chosen target application
                     string search = mediaAppId.Replace(".exe", "").ToLowerInvariant();
                     foreach (AppSessionInfo s in sessions)
                     {
-                        if (s.ProcessName.ToLowerInvariant().Contains(search) && s.Peak > 0.0001f)
+                        if (s.ProcessName.ToLowerInvariant().Contains(search) ||
+                            s.DisplayTitle.ToLowerInvariant().Contains(search))
                         {
                             chosen = s;
                             break;
                         }
                     }
-                }
 
-                // Else pick the session with the loudest output
-                if (chosen == null && loudest != null)
-                {
-                    chosen = loudest;
-                }
-
-                // 2. If no app has active sound right now (e.g. paused music or quiet moment),
-                // match the currently displayed media player:
-                if (chosen == null && !string.IsNullOrEmpty(mediaAppId))
-                {
-                    string search = mediaAppId.Replace(".exe", "").ToLowerInvariant();
-                    foreach (AppSessionInfo s in sessions)
+                    if (chosen == null)
                     {
-                        if (s.ProcessName.ToLowerInvariant().Contains(search))
-                        {
-                            chosen = s;
-                            break;
-                        }
+                        // Target app has no audio session at the moment
+                        return mediaAppId.Replace(".exe", "") + ": --%";
                     }
                 }
-
-                // 3. If still null, pick the first non-background/wallpaper session
-                if (chosen == null)
+                else
                 {
+                    // Auto mode:
+                    // 1. App actively producing sound output (Peak > 0.0001f)
+                    AppSessionInfo loudest = null;
+                    float maxPeak = 0.0001f;
+
                     foreach (AppSessionInfo s in sessions)
                     {
-                        string lower = s.ProcessName.ToLowerInvariant();
-                        if (!lower.Contains("wallpaper") && !lower.Contains("shellexperience") && !lower.Contains("translucenttb"))
+                        if (s.Peak > maxPeak)
                         {
-                            chosen = s;
-                            break;
+                            maxPeak = s.Peak;
+                            loudest = s;
+                        }
+                    }
+
+                    if (loudest != null)
+                    {
+                        chosen = loudest;
+                    }
+                    else
+                    {
+                        // 2. Pick the first non-background/wallpaper session
+                        foreach (AppSessionInfo s in sessions)
+                        {
+                            string lower = s.ProcessName.ToLowerInvariant();
+                            if (!lower.Contains("wallpaper") && !lower.Contains("shellexperience") && !lower.Contains("translucenttb"))
+                            {
+                                chosen = s;
+                                break;
+                            }
                         }
                     }
                 }

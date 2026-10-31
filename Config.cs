@@ -23,6 +23,10 @@ namespace TaskbarMediaWidget
         public bool FontBold { get; set; }
         public bool FontItalic { get; set; }
         public string Language { get; set; }
+        public string TargetAppId { get; set; }
+        public int TaskbarCustomX { get; set; }
+        public int TaskbarCustomY { get; set; }
+        public bool HasCustomTaskbarPos { get; set; }
 
         public Config()
         {
@@ -38,6 +42,10 @@ namespace TaskbarMediaWidget
             FontSize = 10.2f;
             FontBold = false;
             FontItalic = false;
+            TargetAppId = string.Empty;
+            TaskbarCustomX = -1;
+            TaskbarCustomY = -1;
+            HasCustomTaskbarPos = false;
 
             string sysLang = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.ToLowerInvariant();
             Language = (sysLang == "ru" || sysLang == "be" || sysLang == "uk") ? "ru" : "en";
@@ -46,7 +54,20 @@ namespace TaskbarMediaWidget
 
         public static string GetDataDirectory()
         {
-            // Strict portable mode: strictly use the application folder only. Never touch %APPDATA% or system paths.
+            // Strict portable mode: strictly use the application executable folder only.
+            try
+            {
+                string asmPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                if (!string.IsNullOrEmpty(asmPath))
+                {
+                    string dir = Path.GetDirectoryName(asmPath);
+                    if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                    {
+                        return dir;
+                    }
+                }
+            }
+            catch { }
             return AppDomain.CurrentDomain.BaseDirectory;
         }
 
@@ -150,6 +171,25 @@ namespace TaskbarMediaWidget
                                 cfg.Language = string.Equals(val, "en", StringComparison.OrdinalIgnoreCase) ? "en" : "ru";
                             }
                         }
+                        else if (string.Equals(key, "TargetAppId", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.TargetAppId = val;
+                        }
+                        else if (string.Equals(key, "HasCustomTaskbarPos", StringComparison.OrdinalIgnoreCase))
+                        {
+                            bool b;
+                            if (bool.TryParse(val, out b)) cfg.HasCustomTaskbarPos = b;
+                        }
+                        else if (string.Equals(key, "TaskbarCustomX", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int x;
+                            if (int.TryParse(val, out x)) cfg.TaskbarCustomX = x;
+                        }
+                        else if (string.Equals(key, "TaskbarCustomY", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int y;
+                            if (int.TryParse(val, out y)) cfg.TaskbarCustomY = y;
+                        }
                     }
                 }
                 catch
@@ -187,6 +227,10 @@ namespace TaskbarMediaWidget
                 sb.AppendLine("FontSize=" + FontSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 sb.AppendLine("FontBold=" + FontBold);
                 sb.AppendLine("FontItalic=" + FontItalic);
+                sb.AppendLine("TargetAppId=" + (TargetAppId ?? ""));
+                sb.AppendLine("HasCustomTaskbarPos=" + HasCustomTaskbarPos);
+                sb.AppendLine("TaskbarCustomX=" + TaskbarCustomX);
+                sb.AppendLine("TaskbarCustomY=" + TaskbarCustomY);
                 File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
 
                 // Only touch registry if setting differs from current system state

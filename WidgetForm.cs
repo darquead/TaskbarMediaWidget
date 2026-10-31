@@ -188,6 +188,7 @@ namespace TaskbarMediaWidget
         {
             _engine = engine;
             _config = config;
+            _engine.TargetAppId = _config.TargetAppId;
 
             _opacityAlpha = (byte)Math.Max(25, (int)(_config.OpacityPercent * 255 / 100));
 
@@ -262,6 +263,22 @@ namespace TaskbarMediaWidget
                     Point screenPt = new Point(s.pt.x, s.pt.y);
                     Rectangle b = Bounds;
 
+                    // If currently dragging, handle movement or release anywhere on screen
+                    if (_isDragging)
+                    {
+                        if (msg == WM_MOUSEMOVE)
+                        {
+                            HandleDragMove(screenPt);
+                            return (IntPtr)1;
+                        }
+                        else if (msg == WM_LBUTTONUP)
+                        {
+                            Point clientPt = new Point(screenPt.X - Left, screenPt.Y - Top);
+                            HandleMouseUp(new MouseEventArgs(MouseButtons.Left, 1, clientPt.X, clientPt.Y, 0));
+                            return (IntPtr)1;
+                        }
+                    }
+
                     if (b.Contains(screenPt))
                     {
                         Point clientPt = new Point(screenPt.X - Left, screenPt.Y - Top);
@@ -273,7 +290,7 @@ namespace TaskbarMediaWidget
                         }
                         else if (msg == WM_LBUTTONUP)
                         {
-                            OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, clientPt.X, clientPt.Y, 0));
+                            HandleMouseUp(new MouseEventArgs(MouseButtons.Left, 1, clientPt.X, clientPt.Y, 0));
                             return (IntPtr)1;
                         }
                         else if (msg == WM_RBUTTONDOWN)
@@ -678,9 +695,9 @@ namespace TaskbarMediaWidget
 
         public void UpdatePosition()
         {
-            if (_config.IsFreeMode)
+            if (_config.IsFreeMode || _isDragging)
             {
-                // In Free Desktop mode, window position is controlled by the user
+                // In Free Desktop mode or during active drag, window position is controlled by the user
                 return;
             }
 
@@ -725,16 +742,25 @@ namespace TaskbarMediaWidget
                 // Horizontal taskbar (Bottom or Top)
                 targetY = trayRect.Top + (trayHeight - Height) / 2;
 
-                bool isStartInCorner = IsStartInCorner(hStart, startRect, trayRect, false);
-                if (isStartInCorner)
+                if (_config.HasCustomTaskbarPos && _config.TaskbarCustomX >= 0)
                 {
-                    // User requirement: center of taskbar when Start is in corner (left-aligned)
-                    targetX = trayRect.Left + (trayWidth - Width) / 2;
+                    int minX = trayRect.Left;
+                    int maxX = Math.Max(minX, trayRect.Right - Width);
+                    targetX = Math.Max(minX, Math.Min(maxX, _config.TaskbarCustomX));
                 }
                 else
                 {
-                    // Center-aligned: place widget to the left of Start button
-                    targetX = startRect.Left - Width - gap;
+                    bool isStartInCorner = IsStartInCorner(hStart, startRect, trayRect, false);
+                    if (isStartInCorner)
+                    {
+                        // Default: center of taskbar when Start is in corner (left-aligned)
+                        targetX = trayRect.Left + (trayWidth - Width) / 2;
+                    }
+                    else
+                    {
+                        // Center-aligned: place widget to the left of Start button
+                        targetX = startRect.Left - Width - gap;
+                    }
                 }
             }
             else
@@ -742,16 +768,25 @@ namespace TaskbarMediaWidget
                 // Vertical taskbar (Left or Right) -> Rotate 90 degrees
                 targetX = trayRect.Left + (trayWidth - Width) / 2;
 
-                bool isStartInCorner = IsStartInCorner(hStart, startRect, trayRect, true);
-                if (isStartInCorner)
+                if (_config.HasCustomTaskbarPos && _config.TaskbarCustomY >= 0)
                 {
-                    // Start is in corner -> Center vertically on taskbar
-                    targetY = trayRect.Top + (trayHeight - Height) / 2;
+                    int minY = trayRect.Top;
+                    int maxY = Math.Max(minY, trayRect.Bottom - Height);
+                    targetY = Math.Max(minY, Math.Min(maxY, _config.TaskbarCustomY));
                 }
                 else
                 {
-                    // Start is centered vertically -> Place above Start button
-                    targetY = startRect.Top - Height - gap;
+                    bool isStartInCorner = IsStartInCorner(hStart, startRect, trayRect, true);
+                    if (isStartInCorner)
+                    {
+                        // Start is in corner -> Center vertically on taskbar
+                        targetY = trayRect.Top + (trayHeight - Height) / 2;
+                    }
+                    else
+                    {
+                        // Start is centered vertically -> Place above Start button
+                        targetY = startRect.Top - Height - gap;
+                    }
                 }
             }
 
@@ -798,31 +833,9 @@ namespace TaskbarMediaWidget
         {
             base.OnMouseMove(e);
 
-            if (_isDragging && _config.IsFreeMode)
+            if (_isDragging)
             {
-                int dx = Cursor.Position.X - _dragStartCursor.X;
-                int dy = Cursor.Position.Y - _dragStartCursor.Y;
-                if (Math.Abs(dx) > 2 || Math.Abs(dy) > 2)
-                {
-                    _hasDragged = true;
-                }
-                int targetX = _dragStartLocation.X + dx;
-                int targetY = _dragStartLocation.Y + dy;
-
-                // Clamp to screen WorkingArea so the widget can NEVER be dragged behind/under the taskbar or off-screen
-                Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
-                int minX = workArea.Left;
-                int maxX = Math.Max(minX, workArea.Right - Width);
-                int minY = workArea.Top;
-                int maxY = Math.Max(minY, workArea.Bottom - Height);
-
-                int newX = Math.Max(minX, Math.Min(maxX, targetX));
-                int newY = Math.Max(minY, Math.Min(maxY, targetY));
-
-                Location = new Point(newX, newY);
-                SetWindowPos(Handle, HWND_BOTTOM, newX, newY, Width, Height, SWP_NOSIZE | SWP_NOACTIVATE);
-                _config.FreeX = newX;
-                _config.FreeY = newY;
+                HandleDragMove(Cursor.Position);
                 return;
             }
 
@@ -842,6 +855,78 @@ namespace TaskbarMediaWidget
             {
                 if (_hoverIndex != 3) _marqueeOffset = 0;
                 Redraw();
+            }
+        }
+
+        private void HandleDragMove(Point currentCursor)
+        {
+            int dx = currentCursor.X - _dragStartCursor.X;
+            int dy = currentCursor.Y - _dragStartCursor.Y;
+            if (Math.Abs(dx) > 2 || Math.Abs(dy) > 2)
+            {
+                _hasDragged = true;
+            }
+
+            if (_config.IsFreeMode)
+            {
+                int targetX = _dragStartLocation.X + dx;
+                int targetY = _dragStartLocation.Y + dy;
+
+                // Clamp to screen WorkingArea so the widget can NEVER be dragged behind/under the taskbar or off-screen
+                Rectangle workArea = Screen.FromPoint(currentCursor).WorkingArea;
+                int minX = workArea.Left;
+                int maxX = Math.Max(minX, workArea.Right - Width);
+                int minY = workArea.Top;
+                int maxY = Math.Max(minY, workArea.Bottom - Height);
+
+                int newX = Math.Max(minX, Math.Min(maxX, targetX));
+                int newY = Math.Max(minY, Math.Min(maxY, targetY));
+
+                Location = new Point(newX, newY);
+                SetWindowPos(Handle, HWND_BOTTOM, newX, newY, Width, Height, SWP_NOSIZE | SWP_NOACTIVATE);
+                _config.FreeX = newX;
+                _config.FreeY = newY;
+            }
+            else
+            {
+                // Dragging along the Windows Taskbar
+                IntPtr hTray = FindWindow("Shell_TrayWnd", null);
+                if (hTray == IntPtr.Zero) return;
+
+                RECT trayRect;
+                GetWindowRect(hTray, out trayRect);
+                int trayHeight = trayRect.Bottom - trayRect.Top;
+                int trayWidth = trayRect.Right - trayRect.Left;
+                bool isVertical = (trayHeight > trayWidth);
+
+                if (!isVertical)
+                {
+                    int targetX = _dragStartLocation.X + dx;
+                    int minX = trayRect.Left;
+                    int maxX = Math.Max(minX, trayRect.Right - Width);
+                    int clampedX = Math.Max(minX, Math.Min(maxX, targetX));
+                    int fixedY = trayRect.Top + (trayHeight - Height) / 2;
+
+                    Location = new Point(clampedX, fixedY);
+                    SetWindowPos(Handle, HWND_TOPMOST, clampedX, fixedY, Width, Height, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+                    _config.TaskbarCustomX = clampedX;
+                    _config.HasCustomTaskbarPos = true;
+                }
+                else
+                {
+                    int targetY = _dragStartLocation.Y + dy;
+                    int minY = trayRect.Top;
+                    int maxY = Math.Max(minY, trayRect.Bottom - Height);
+                    int clampedY = Math.Max(minY, Math.Min(maxY, targetY));
+                    int fixedX = trayRect.Left + (trayWidth - Width) / 2;
+
+                    Location = new Point(fixedX, clampedY);
+                    SetWindowPos(Handle, HWND_TOPMOST, fixedX, clampedY, Width, Height, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+                    _config.TaskbarCustomY = clampedY;
+                    _config.HasCustomTaskbarPos = true;
+                }
             }
         }
 
@@ -897,18 +982,11 @@ namespace TaskbarMediaWidget
                 }
                 else if (index == 3 || index == -1)
                 {
-                    if (_config.IsFreeMode)
-                    {
-                        // In desktop mode, start DragMove
-                        _isDragging = true;
-                        _dragStartCursor = Cursor.Position;
-                        _dragStartLocation = Location;
-                        _hasDragged = false;
-                    }
-                    else if (index == 3 && !_config.IsCompactMode)
-                    {
-                        _engine.ActivatePlayerWindow();
-                    }
+                    // Allow dragging in both Free Desktop mode and Taskbar mode
+                    _isDragging = true;
+                    _dragStartCursor = Cursor.Position;
+                    _dragStartLocation = Location;
+                    _hasDragged = false;
                 }
             }
             else if (e.Button == MouseButtons.Right)
@@ -922,23 +1000,33 @@ namespace TaskbarMediaWidget
             base.OnMouseUp(e);
             if (e.Button == MouseButtons.Left)
             {
-                if (_isDragging && _config.IsFreeMode)
-                {
-                    _isDragging = false;
-                    _config.Save();
+                HandleMouseUp(e);
+            }
+        }
 
+        private void HandleMouseUp(MouseEventArgs e)
+        {
+            if (_isDragging)
+            {
+                _isDragging = false;
+                if (_hasDragged)
+                {
+                    _config.Save();
+                }
+                else
+                {
                     // If user clicked without dragging, open player
-                    if (!_hasDragged && _pressedIndex == 3 && !_config.IsCompactMode)
+                    if (_pressedIndex == 3 && !_config.IsCompactMode)
                     {
                         _engine.ActivatePlayerWindow();
                     }
                 }
+            }
 
-                if (_pressedIndex != -1)
-                {
-                    _pressedIndex = -1;
-                    Redraw();
-                }
+            if (_pressedIndex != -1)
+            {
+                _pressedIndex = -1;
+                Redraw();
             }
         }
 
@@ -947,7 +1035,8 @@ namespace TaskbarMediaWidget
             base.OnMouseWheel(e);
             if (!_config.EnableVolumeWheel) return;
 
-            string feedback = AppVolumeManager.ChangeVolume(e.Delta, _engine.CurrentInfo.AppId);
+            string targetApp = !string.IsNullOrEmpty(_config.TargetAppId) ? _config.TargetAppId : _engine.CurrentInfo.AppId;
+            string feedback = AppVolumeManager.ChangeVolume(e.Delta, targetApp);
             _volumeFeedbackText = feedback;
 
             _volumeFeedbackTimer.Stop();
@@ -978,6 +1067,51 @@ namespace TaskbarMediaWidget
             menu.Items.Add(prevItem);
             menu.Items.Add(playItem);
             menu.Items.Add(nextItem);
+
+            menu.Items.Add(new ToolStripSeparator());
+
+            // Источник звука / медиа (Audio Source)
+            ToolStripMenuItem sourceMenu = new ToolStripMenuItem(Loc.AudioSource);
+
+            ToolStripMenuItem autoItem = new ToolStripMenuItem(Loc.AudioSourceAuto, null, (s, e) =>
+            {
+                _config.TargetAppId = string.Empty;
+                _engine.TargetAppId = string.Empty;
+                _config.Save();
+                _engine.Refresh();
+                Redraw();
+            });
+            autoItem.Checked = string.IsNullOrEmpty(_config.TargetAppId);
+            sourceMenu.DropDownItems.Add(autoItem);
+            sourceMenu.DropDownItems.Add(new ToolStripSeparator());
+
+            System.Collections.Generic.List<MediaAppItem> apps = _engine.GetAvailableMediaApps();
+            if (apps.Count > 0)
+            {
+                foreach (MediaAppItem app in apps)
+                {
+                    string appId = app.Id;
+                    string itemText = (app.IsPlaying ? "▶ " : "▫ ") + app.DisplayName;
+                    ToolStripMenuItem appItem = new ToolStripMenuItem(itemText, null, (s, e) =>
+                    {
+                        _config.TargetAppId = appId;
+                        _engine.TargetAppId = appId;
+                        _config.Save();
+                        _engine.Refresh();
+                        Redraw();
+                    });
+                    appItem.Checked = string.Equals(_config.TargetAppId, appId, StringComparison.OrdinalIgnoreCase);
+                    sourceMenu.DropDownItems.Add(appItem);
+                }
+            }
+            else
+            {
+                ToolStripMenuItem noAppsItem = new ToolStripMenuItem(Loc.NoAppsFound);
+                noAppsItem.Enabled = false;
+                sourceMenu.DropDownItems.Add(noAppsItem);
+            }
+
+            menu.Items.Add(sourceMenu);
 
             menu.Items.Add(new ToolStripSeparator());
 
@@ -1037,6 +1171,10 @@ namespace TaskbarMediaWidget
                 }
                 else
                 {
+                    _config.HasCustomTaskbarPos = false;
+                    _config.TaskbarCustomX = -1;
+                    _config.TaskbarCustomY = -1;
+                    _config.Save();
                     UpdatePosition();
                 }
             });

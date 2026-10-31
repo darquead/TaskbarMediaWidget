@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -18,6 +19,13 @@ namespace TaskbarMediaWidget
         Stopped = 2,
         Playing = 3,
         Paused = 4
+    }
+
+    public class MediaAppItem
+    {
+        public string Id { get; set; }
+        public string DisplayName { get; set; }
+        public bool IsPlaying { get; set; }
     }
 
     public class MediaInfo
@@ -111,6 +119,7 @@ namespace TaskbarMediaWidget
         private bool _smtcInitialized;
 
         public MediaInfo CurrentInfo { get; private set; }
+        public string TargetAppId { get; set; }
 
         public event Action OnMediaChanged;
 
@@ -284,6 +293,65 @@ namespace TaskbarMediaWidget
                                     else info.State = PlaybackState.Closed;
                                 }
                             }
+                            else if (!string.IsNullOrEmpty(TargetAppId))
+                            {
+                                string pName = CleanAppKey(TargetAppId).Replace(".exe", "");
+                                bool procFound = false;
+                                try
+                                {
+                                    Process[] procs = Process.GetProcessesByName(pName);
+                                    if (procs != null && procs.Length > 0)
+                                    {
+                                        procFound = true;
+                                        string winTitle = "";
+                                        foreach (Process p in procs)
+                                        {
+                                            try
+                                            {
+                                                if (!string.IsNullOrEmpty(p.MainWindowTitle))
+                                                {
+                                                    winTitle = p.MainWindowTitle;
+                                                    break;
+                                                }
+                                            }
+                                            catch { }
+                                        }
+                                        foreach (Process p in procs) { try { p.Dispose(); } catch { } }
+
+                                        info.AppId = TargetAppId;
+                                        info.State = PlaybackState.Paused;
+                                        if (!string.IsNullOrEmpty(winTitle))
+                                        {
+                                            int dash = winTitle.IndexOf(" - ");
+                                            if (dash > 0)
+                                            {
+                                                info.Artist = winTitle.Substring(0, dash).Trim();
+                                                info.Title = winTitle.Substring(dash + 3).Trim();
+                                            }
+                                            else
+                                            {
+                                                info.Title = winTitle;
+                                                info.Artist = FormatFriendlyAppName(TargetAppId);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            info.Title = FormatFriendlyAppName(TargetAppId);
+                                            info.Artist = string.Empty;
+                                        }
+                                    }
+                                }
+                                catch { }
+
+                                if (!procFound)
+                                {
+                                    info.AppId = TargetAppId;
+                                    info.State = PlaybackState.Closed;
+                                    info.Title = string.Empty;
+                                    info.Artist = string.Empty;
+                                    info.Thumbnail = null;
+                                }
+                            }
                         }
                         catch
                         {
@@ -316,9 +384,172 @@ namespace TaskbarMediaWidget
             });
         }
 
+        public List<MediaAppItem> GetAvailableMediaApps()
+        {
+            Dictionary<string, MediaAppItem> map = new Dictionary<string, MediaAppItem>(StringComparer.OrdinalIgnoreCase);
+
+            // 1. Enumerate SMTC sessions
+            if (_smtcInitialized && _sessionManager != null)
+            {
+                try
+                {
+                    dynamic sessions = _sessionManager.GetSessions();
+                    if (sessions != null)
+                    {
+                        foreach (dynamic s in sessions)
+                        {
+                            if (s == null) continue;
+                            try
+                            {
+                                string appId = (string)s.SourceAppUserModelId;
+                                if (string.IsNullOrEmpty(appId)) continue;
+
+                                string friendly = FormatFriendlyAppName(appId);
+                                bool isPlaying = false;
+                                try
+                                {
+                                    dynamic pb = s.GetPlaybackInfo();
+                                    if (pb != null && (int)pb.PlaybackStatus == 4) isPlaying = true;
+                                }
+                                catch { }
+
+                                string key = CleanAppKey(appId);
+                                map[key] = new MediaAppItem
+                                {
+                                    Id = key,
+                                    DisplayName = friendly,
+                                    IsPlaying = isPlaying
+                                };
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // 2. Query active WASAPI audio apps
+            try
+            {
+                List<AppVolumeManager.AudioAppInfo> audioApps = AppVolumeManager.GetActiveAudioApps();
+                foreach (AppVolumeManager.AudioAppInfo a in audioApps)
+                {
+                    string key = CleanAppKey(a.Id);
+                    if (!map.ContainsKey(key))
+                    {
+                        map[key] = new MediaAppItem
+                        {
+                            Id = key,
+                            DisplayName = a.DisplayName,
+                            IsPlaying = a.IsActiveAudio
+                        };
+                    }
+                    else if (a.IsActiveAudio)
+                    {
+                        map[key].IsPlaying = true;
+                    }
+                }
+            }
+            catch { }
+
+            // 3. If a TargetAppId is already configured in Config but not detected right now, preserve it in the list
+            if (!string.IsNullOrEmpty(TargetAppId))
+            {
+                string key = CleanAppKey(TargetAppId);
+                if (!map.ContainsKey(key))
+                {
+                    map[key] = new MediaAppItem
+                    {
+                        Id = key,
+                        DisplayName = FormatFriendlyAppName(key),
+                        IsPlaying = false
+                    };
+                }
+            }
+
+            List<MediaAppItem> list = new List<MediaAppItem>();
+            foreach (KeyValuePair<string, MediaAppItem> kvp in map)
+            {
+                list.Add(kvp.Value);
+            }
+
+            // Sort: playing first, then alphabetical
+            list.Sort((a, b) =>
+            {
+                if (a.IsPlaying != b.IsPlaying) return a.IsPlaying ? -1 : 1;
+                return string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase);
+            });
+
+            return list;
+        }
+
+        public static string CleanAppKey(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return string.Empty;
+            int slash = raw.LastIndexOf('\\');
+            if (slash >= 0 && slash < raw.Length - 1) raw = raw.Substring(slash + 1);
+            int bang = raw.IndexOf('!');
+            if (bang >= 0) raw = raw.Substring(0, bang);
+            if (!raw.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) raw += ".exe";
+            return raw;
+        }
+
+        public static string FormatFriendlyAppName(string appId)
+        {
+            if (string.IsNullOrEmpty(appId)) return "Unknown";
+            string lower = appId.ToLowerInvariant();
+            if (lower.Contains("spotify")) return "Spotify";
+            if (lower.Contains("chrome")) return "Google Chrome";
+            if (lower.Contains("msedge")) return "Microsoft Edge";
+            if (lower.Contains("firefox")) return "Mozilla Firefox";
+            if (lower.Contains("telegram")) return "Telegram";
+            if (lower.Contains("yandexmusic") || lower.Contains("yandex.music")) return "Яндекс Музыка (Yandex Music)";
+            if (lower.Contains("zunemusic")) return "Windows Media Player";
+            if (lower.Contains("aimp")) return "AIMP";
+            if (lower.Contains("foobar2000")) return "foobar2000";
+            if (lower.Contains("vlc")) return "VLC Media Player";
+            if (lower.Contains("discord")) return "Discord";
+
+            string clean = CleanAppKey(appId);
+            if (clean.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                clean = clean.Substring(0, clean.Length - 4);
+            }
+            return clean;
+        }
+
         private dynamic GetActiveSession()
         {
             if (_sessionManager == null) return _currentSession;
+
+            if (!string.IsNullOrEmpty(TargetAppId))
+            {
+                string search = CleanAppKey(TargetAppId).Replace(".exe", "").ToLowerInvariant();
+                try
+                {
+                    dynamic sessions = _sessionManager.GetSessions();
+                    if (sessions != null)
+                    {
+                        foreach (dynamic s in sessions)
+                        {
+                            if (s == null) continue;
+                            try
+                            {
+                                string appId = (string)s.SourceAppUserModelId;
+                                if (!string.IsNullOrEmpty(appId) && appId.ToLowerInvariant().Contains(search))
+                                {
+                                    return s;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+
+                // Specific target app is selected, but it has no active SMTC session
+                return null;
+            }
 
             try
             {
@@ -365,6 +596,39 @@ namespace TaskbarMediaWidget
             catch { }
 
             return _currentSession;
+        }
+
+        private void SendAppCommandToProcess(string targetAppId, int appCommand)
+        {
+            string search = CleanAppKey(targetAppId).Replace(".exe", "").ToLowerInvariant();
+            try
+            {
+                EnumWindows((hWnd, lParam) =>
+                {
+                    if (IsWindowVisible(hWnd))
+                    {
+                        uint pid;
+                        GetWindowThreadProcessId(hWnd, out pid);
+                        if (pid != 0)
+                        {
+                            try
+                            {
+                                using (Process p = Process.GetProcessById((int)pid))
+                                {
+                                    string pName = p.ProcessName.ToLowerInvariant();
+                                    if (pName.Contains(search))
+                                    {
+                                        SendMessage(hWnd, (uint)WM_APPCOMMAND, hWnd, (IntPtr)(appCommand << 16));
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
         }
 
         private void SendMediaCommand(int appCommand, byte vk)
@@ -425,8 +689,16 @@ namespace TaskbarMediaWidget
 
             if (!handled)
             {
-                Program.Log("TogglePlayPause executed via fallback");
-                SendMediaCommand(APPCOMMAND_MEDIA_PLAY_PAUSE, VK_MEDIA_PLAY_PAUSE);
+                if (!string.IsNullOrEmpty(TargetAppId))
+                {
+                    Program.Log("TogglePlayPause executed via target window appcommand: " + TargetAppId);
+                    SendAppCommandToProcess(TargetAppId, APPCOMMAND_MEDIA_PLAY_PAUSE);
+                }
+                else
+                {
+                    Program.Log("TogglePlayPause executed via fallback");
+                    SendMediaCommand(APPCOMMAND_MEDIA_PLAY_PAUSE, VK_MEDIA_PLAY_PAUSE);
+                }
             }
 
             // Immediately toggle visual state predictively for instant feedback
@@ -472,8 +744,16 @@ namespace TaskbarMediaWidget
 
             if (!handled)
             {
-                Program.Log("NextTrack executed via fallback");
-                SendMediaCommand(APPCOMMAND_MEDIA_NEXTTRACK, VK_MEDIA_NEXT_TRACK);
+                if (!string.IsNullOrEmpty(TargetAppId))
+                {
+                    Program.Log("NextTrack executed via target window appcommand: " + TargetAppId);
+                    SendAppCommandToProcess(TargetAppId, APPCOMMAND_MEDIA_NEXTTRACK);
+                }
+                else
+                {
+                    Program.Log("NextTrack executed via fallback");
+                    SendMediaCommand(APPCOMMAND_MEDIA_NEXTTRACK, VK_MEDIA_NEXT_TRACK);
+                }
             }
 
             Timer t = null;
@@ -506,8 +786,16 @@ namespace TaskbarMediaWidget
 
             if (!handled)
             {
-                Program.Log("PrevTrack executed via fallback");
-                SendMediaCommand(APPCOMMAND_MEDIA_PREVIOUSTRACK, VK_MEDIA_PREV_TRACK);
+                if (!string.IsNullOrEmpty(TargetAppId))
+                {
+                    Program.Log("PrevTrack executed via target window appcommand: " + TargetAppId);
+                    SendAppCommandToProcess(TargetAppId, APPCOMMAND_MEDIA_PREVIOUSTRACK);
+                }
+                else
+                {
+                    Program.Log("PrevTrack executed via fallback");
+                    SendMediaCommand(APPCOMMAND_MEDIA_PREVIOUSTRACK, VK_MEDIA_PREV_TRACK);
+                }
             }
 
             Timer t = null;
@@ -547,22 +835,12 @@ namespace TaskbarMediaWidget
                         CloseDesktop(hDesk);
                     }
 
-                    string appId = CurrentInfo.AppId;
+                    string appId = !string.IsNullOrEmpty(TargetAppId) ? TargetAppId : CurrentInfo.AppId;
                     string procSearch = "Spotify";
 
                     if (!string.IsNullOrEmpty(appId))
                     {
-                        if (appId.IndexOf("Spotify", StringComparison.OrdinalIgnoreCase) >= 0) procSearch = "Spotify";
-                        else if (appId.IndexOf("chrome", StringComparison.OrdinalIgnoreCase) >= 0) procSearch = "chrome";
-                        else if (appId.IndexOf("msedge", StringComparison.OrdinalIgnoreCase) >= 0) procSearch = "msedge";
-                        else if (appId.IndexOf("firefox", StringComparison.OrdinalIgnoreCase) >= 0) procSearch = "firefox";
-                        else if (appId.IndexOf("YandexMusic", StringComparison.OrdinalIgnoreCase) >= 0) procSearch = "YandexMusic";
-                        else if (appId.IndexOf("AIMP", StringComparison.OrdinalIgnoreCase) >= 0) procSearch = "AIMP";
-                        else
-                        {
-                            int dot = appId.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
-                            if (dot > 0) procSearch = appId.Substring(0, dot);
-                        }
+                        procSearch = CleanAppKey(appId).Replace(".exe", "");
                     }
 
                     Process[] procs = Process.GetProcessesByName(procSearch);

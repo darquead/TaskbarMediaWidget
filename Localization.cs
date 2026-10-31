@@ -115,5 +115,25 @@ namespace TaskbarMediaWidget
         {
             get { return IsRussian ? "Громкость -" : "Volume -"; }
         }
+
+        public static string AudioSource
+        {
+            get { return IsRussian ? "🎯  Источник звука / медиа" : "🎯  Audio / Media Source"; }
+        }
+
+        public static string AudioSourceAuto
+        {
+            get { return IsRussian ? "⚡  Все приложения (Авто)" : "⚡  All Applications (Auto)"; }
+        }
+
+        public static string RefreshApps
+        {
+            get { return IsRussian ? "🔄  Обновить список" : "🔄  Refresh App List"; }
+        }
+
+        public static string NoAppsFound
+        {
+            get { return IsRussian ? "Нет активных аудио-приложений" : "No active audio apps found"; }
+        }
     }
 }
