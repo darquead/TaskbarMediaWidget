@@ -110,13 +110,26 @@ namespace TaskbarMediaWidget
         private const int SW_RESTORE = 9;
 
         private dynamic _sessionManager;
-        private dynamic _currentSession;
         private MethodInfo _asTaskGeneric;
         private MethodInfo _asStreamMethod;
         private Type _propType;
         private Type _streamType;
         private readonly object _lock = new object();
         private bool _smtcInitialized;
+
+        private int _isRefreshing = 0;
+        private int _lastPropertyFetchTick = 0;
+        private bool _forcePropertiesCheck = true;
+        private string _cachedSessionAppId = null;
+        private PlaybackState _cachedPlaybackState = PlaybackState.Closed;
+
+        public static void SafeReleaseCom(object obj)
+        {
+            if (obj != null && Marshal.IsComObject(obj))
+            {
+                try { Marshal.FinalReleaseComObject(obj); } catch { }
+            }
+        }
 
         public MediaInfo CurrentInfo { get; private set; }
         public string TargetAppId { get; set; }
@@ -172,12 +185,16 @@ namespace TaskbarMediaWidget
             {
                 MethodInfo method = _asTaskGeneric.MakeGenericMethod(resultType);
                 dynamic task = method.Invoke(null, new object[] { asyncOp });
-                task.Wait(1200);
+                task.Wait(1000);
                 return task.Result;
             }
             catch
             {
                 return null;
+            }
+            finally
+            {
+                SafeReleaseCom(asyncOp);
             }
         }
 
@@ -201,10 +218,12 @@ namespace TaskbarMediaWidget
 
         private Bitmap ExtractThumbnail(dynamic props)
         {
+            if (props == null) return null;
+            dynamic thumb = null;
+            object winRtStream = null;
             try
             {
-                if (props == null) return null;
-                dynamic thumb = props.Thumbnail;
+                thumb = props.Thumbnail;
                 if (thumb == null) return null;
 
                 if (_streamType == null)
@@ -217,7 +236,7 @@ namespace TaskbarMediaWidget
                 }
 
                 dynamic streamOp = thumb.OpenReadAsync();
-                object winRtStream = AwaitWinRt(streamOp, _streamType);
+                winRtStream = AwaitWinRt(streamOp, _streamType);
                 if (winRtStream == null) return null;
 
                 using (Stream netStream = ConvertToNetStream(winRtStream))
@@ -242,144 +261,207 @@ namespace TaskbarMediaWidget
                 Program.Log("ExtractThumbnail error: " + ex.Message);
                 return null;
             }
+            finally
+            {
+                SafeReleaseCom(winRtStream);
+                SafeReleaseCom(thumb);
+            }
         }
 
         public void Refresh()
         {
+            if (Interlocked.CompareExchange(ref _isRefreshing, 1, 0) != 0)
+            {
+                return;
+            }
+
             ThreadPool.QueueUserWorkItem(state =>
             {
-                lock (_lock)
+                try
                 {
-                    MediaInfo info = new MediaInfo();
-
-                    if (_smtcInitialized && _sessionManager != null)
+                    lock (_lock)
                     {
-                        try
+                        MediaInfo info = new MediaInfo();
+
+                        if (_smtcInitialized && _sessionManager != null)
                         {
-                            dynamic session = GetActiveSession();
-                            _currentSession = session;
-
-                            if (session != null)
+                            dynamic session = null;
+                            try
                             {
-                                info.AppId = (string)session.SourceAppUserModelId;
+                                session = GetActiveSession();
 
-                                dynamic propOp = session.TryGetMediaPropertiesAsync();
-                                dynamic props = AwaitWinRt(propOp, _propType);
-                                if (props != null)
+                                if (session != null)
                                 {
-                                    info.Title = (string)props.Title;
-                                    info.Artist = (string)props.Artist;
+                                    string appId = "";
+                                    try { appId = (string)session.SourceAppUserModelId; } catch { }
+                                    info.AppId = appId;
 
-                                    bool trackChanged = (CurrentInfo.Title != info.Title || CurrentInfo.Artist != info.Artist || CurrentInfo.Thumbnail == null);
-                                    if (trackChanged && !string.IsNullOrEmpty(info.Title))
+                                    // 1. Get playback status
+                                    dynamic playback = null;
+                                    try
                                     {
-                                        info.Thumbnail = ExtractThumbnail(props);
+                                        playback = session.GetPlaybackInfo();
+                                        if (playback != null)
+                                        {
+                                            int statusVal = (int)playback.PlaybackStatus;
+                                            // 0=Closed, 1=Opened, 2=Changing, 3=Stopped, 4=Playing, 5=Paused
+                                            if (statusVal == 4) info.State = PlaybackState.Playing;
+                                            else if (statusVal == 5) info.State = PlaybackState.Paused;
+                                            else if (statusVal == 3) info.State = PlaybackState.Stopped;
+                                            else info.State = PlaybackState.Closed;
+                                        }
+                                    }
+                                    catch { }
+                                    finally
+                                    {
+                                        SafeReleaseCom(playback);
+                                    }
+
+                                    // 2. Query heavyweight media properties only when track or state changes, or periodic heartbeat
+                                    int now = Environment.TickCount;
+                                    bool stateChanged = (info.State != _cachedPlaybackState);
+                                    bool appChanged = !string.Equals(info.AppId, _cachedSessionAppId, StringComparison.OrdinalIgnoreCase);
+                                    bool periodElapsed = (now - _lastPropertyFetchTick > 2500) || (_lastPropertyFetchTick == 0);
+                                    bool needsFetch = _forcePropertiesCheck || appChanged || (stateChanged && info.State == PlaybackState.Playing) || periodElapsed;
+
+                                    if (needsFetch)
+                                    {
+                                        dynamic propOp = null;
+                                        dynamic props = null;
+                                        try
+                                        {
+                                            propOp = session.TryGetMediaPropertiesAsync();
+                                            props = AwaitWinRt(propOp, _propType);
+                                            if (props != null)
+                                            {
+                                                info.Title = (string)props.Title;
+                                                info.Artist = (string)props.Artist;
+
+                                                bool trackChanged = (CurrentInfo.Title != info.Title || CurrentInfo.Artist != info.Artist || CurrentInfo.Thumbnail == null);
+                                                if (trackChanged && !string.IsNullOrEmpty(info.Title))
+                                                {
+                                                    info.Thumbnail = ExtractThumbnail(props);
+                                                }
+                                                else
+                                                {
+                                                    info.Thumbnail = CurrentInfo.Thumbnail;
+                                                }
+                                            }
+                                        }
+                                        catch { }
+                                        finally
+                                        {
+                                            SafeReleaseCom(props);
+                                            _lastPropertyFetchTick = now;
+                                            _forcePropertiesCheck = false;
+                                            _cachedSessionAppId = info.AppId;
+                                            _cachedPlaybackState = info.State;
+                                        }
                                     }
                                     else
                                     {
+                                        // Reuse cached track metadata without invoking WinRT async properties
+                                        info.Title = CurrentInfo.Title;
+                                        info.Artist = CurrentInfo.Artist;
                                         info.Thumbnail = CurrentInfo.Thumbnail;
                                     }
                                 }
-
-                                dynamic playback = session.GetPlaybackInfo();
-                                if (playback != null)
+                                else if (!string.IsNullOrEmpty(TargetAppId))
                                 {
-                                    int statusVal = (int)playback.PlaybackStatus;
-                                    // Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus:
-                                    // 0=Closed, 1=Opened, 2=Changing, 3=Stopped, 4=Playing, 5=Paused
-                                    if (statusVal == 4) info.State = PlaybackState.Playing;
-                                    else if (statusVal == 5) info.State = PlaybackState.Paused;
-                                    else if (statusVal == 3) info.State = PlaybackState.Stopped;
-                                    else info.State = PlaybackState.Closed;
-                                }
-                            }
-                            else if (!string.IsNullOrEmpty(TargetAppId))
-                            {
-                                string pName = CleanAppKey(TargetAppId).Replace(".exe", "");
-                                bool procFound = false;
-                                try
-                                {
-                                    Process[] procs = Process.GetProcessesByName(pName);
-                                    if (procs != null && procs.Length > 0)
+                                    string pName = CleanAppKey(TargetAppId).Replace(".exe", "");
+                                    bool procFound = false;
+                                    try
                                     {
-                                        procFound = true;
-                                        string winTitle = "";
-                                        foreach (Process p in procs)
+                                        Process[] procs = Process.GetProcessesByName(pName);
+                                        if (procs != null && procs.Length > 0)
                                         {
-                                            try
+                                            procFound = true;
+                                            string winTitle = "";
+                                            foreach (Process p in procs)
                                             {
-                                                if (!string.IsNullOrEmpty(p.MainWindowTitle))
+                                                try
                                                 {
-                                                    winTitle = p.MainWindowTitle;
-                                                    break;
+                                                    if (!string.IsNullOrEmpty(p.MainWindowTitle))
+                                                    {
+                                                        winTitle = p.MainWindowTitle;
+                                                        break;
+                                                    }
                                                 }
+                                                catch { }
                                             }
-                                            catch { }
-                                        }
-                                        foreach (Process p in procs) { try { p.Dispose(); } catch { } }
+                                            foreach (Process p in procs) { try { p.Dispose(); } catch { } }
 
-                                        info.AppId = TargetAppId;
-                                        info.State = PlaybackState.Paused;
-                                        if (!string.IsNullOrEmpty(winTitle))
-                                        {
-                                            int dash = winTitle.IndexOf(" - ");
-                                            if (dash > 0)
+                                            info.AppId = TargetAppId;
+                                            info.State = PlaybackState.Paused;
+                                            if (!string.IsNullOrEmpty(winTitle))
                                             {
-                                                info.Artist = winTitle.Substring(0, dash).Trim();
-                                                info.Title = winTitle.Substring(dash + 3).Trim();
+                                                int dash = winTitle.IndexOf(" - ");
+                                                if (dash > 0)
+                                                {
+                                                    info.Artist = winTitle.Substring(0, dash).Trim();
+                                                    info.Title = winTitle.Substring(dash + 3).Trim();
+                                                }
+                                                else
+                                                {
+                                                    info.Title = winTitle;
+                                                    info.Artist = FormatFriendlyAppName(TargetAppId);
+                                                }
                                             }
                                             else
                                             {
-                                                info.Title = winTitle;
-                                                info.Artist = FormatFriendlyAppName(TargetAppId);
+                                                info.Title = FormatFriendlyAppName(TargetAppId);
+                                                info.Artist = string.Empty;
                                             }
                                         }
-                                        else
-                                        {
-                                            info.Title = FormatFriendlyAppName(TargetAppId);
-                                            info.Artist = string.Empty;
-                                        }
+                                    }
+                                    catch { }
+
+                                    if (!procFound)
+                                    {
+                                        info.AppId = TargetAppId;
+                                        info.State = PlaybackState.Closed;
+                                        info.Title = string.Empty;
+                                        info.Artist = string.Empty;
+                                        info.Thumbnail = null;
                                     }
                                 }
-                                catch { }
-
-                                if (!procFound)
-                                {
-                                    info.AppId = TargetAppId;
-                                    info.State = PlaybackState.Closed;
-                                    info.Title = string.Empty;
-                                    info.Artist = string.Empty;
-                                    info.Thumbnail = null;
-                                }
+                            }
+                            catch
+                            {
+                            }
+                            finally
+                            {
+                                SafeReleaseCom(session);
                             }
                         }
-                        catch
+
+                        bool changed = (CurrentInfo.Title != info.Title ||
+                                        CurrentInfo.Artist != info.Artist ||
+                                        CurrentInfo.State != info.State ||
+                                        CurrentInfo.AppId != info.AppId ||
+                                        CurrentInfo.Thumbnail != info.Thumbnail);
+
+                        if (changed)
                         {
+                            Program.Log("Media changed: " + info.Artist + " - " + info.Title + " [" + info.State + "] " + info.AppId + ", thumb=" + (info.Thumbnail != null));
+                        }
+
+                        Bitmap oldThumb = (CurrentInfo.Thumbnail != info.Thumbnail) ? CurrentInfo.Thumbnail : null;
+                        CurrentInfo = info;
+                        if (oldThumb != null)
+                        {
+                            try { oldThumb.Dispose(); } catch { }
+                        }
+
+                        if (changed && OnMediaChanged != null)
+                        {
+                            OnMediaChanged();
                         }
                     }
-
-                    bool changed = (CurrentInfo.Title != info.Title ||
-                                    CurrentInfo.Artist != info.Artist ||
-                                    CurrentInfo.State != info.State ||
-                                    CurrentInfo.AppId != info.AppId ||
-                                    CurrentInfo.Thumbnail != info.Thumbnail);
-
-                    if (changed)
-                    {
-                        Program.Log("Media changed: " + info.Artist + " - " + info.Title + " [" + info.State + "] " + info.AppId + ", thumb=" + (info.Thumbnail != null));
-                    }
-
-                    Bitmap oldThumb = (CurrentInfo.Thumbnail != info.Thumbnail) ? CurrentInfo.Thumbnail : null;
-                    CurrentInfo = info;
-                    if (oldThumb != null)
-                    {
-                        try { oldThumb.Dispose(); } catch { }
-                    }
-
-                    if (changed && OnMediaChanged != null)
-                    {
-                        OnMediaChanged();
-                    }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _isRefreshing, 0);
                 }
             });
         }
@@ -391,9 +473,10 @@ namespace TaskbarMediaWidget
             // 1. Enumerate SMTC sessions
             if (_smtcInitialized && _sessionManager != null)
             {
+                dynamic sessions = null;
                 try
                 {
-                    dynamic sessions = _sessionManager.GetSessions();
+                    sessions = _sessionManager.GetSessions();
                     if (sessions != null)
                     {
                         foreach (dynamic s in sessions)
@@ -406,12 +489,17 @@ namespace TaskbarMediaWidget
 
                                 string friendly = FormatFriendlyAppName(appId);
                                 bool isPlaying = false;
+                                dynamic pb = null;
                                 try
                                 {
-                                    dynamic pb = s.GetPlaybackInfo();
+                                    pb = s.GetPlaybackInfo();
                                     if (pb != null && (int)pb.PlaybackStatus == 4) isPlaying = true;
                                 }
                                 catch { }
+                                finally
+                                {
+                                    SafeReleaseCom(pb);
+                                }
 
                                 string key = CleanAppKey(appId);
                                 map[key] = new MediaAppItem
@@ -422,10 +510,18 @@ namespace TaskbarMediaWidget
                                 };
                             }
                             catch { }
+                            finally
+                            {
+                                SafeReleaseCom(s);
+                            }
                         }
                     }
                 }
                 catch { }
+                finally
+                {
+                    SafeReleaseCom(sessions);
+                }
             }
 
             // 2. Query active WASAPI audio apps
@@ -520,32 +616,44 @@ namespace TaskbarMediaWidget
 
         private dynamic GetActiveSession()
         {
-            if (_sessionManager == null) return _currentSession;
+            if (_sessionManager == null) return null;
 
             if (!string.IsNullOrEmpty(TargetAppId))
             {
                 string search = CleanAppKey(TargetAppId).Replace(".exe", "").ToLowerInvariant();
+                dynamic sessions = null;
                 try
                 {
-                    dynamic sessions = _sessionManager.GetSessions();
+                    sessions = _sessionManager.GetSessions();
                     if (sessions != null)
                     {
+                        dynamic foundSession = null;
                         foreach (dynamic s in sessions)
                         {
                             if (s == null) continue;
                             try
                             {
-                                string appId = (string)s.SourceAppUserModelId;
-                                if (!string.IsNullOrEmpty(appId) && appId.ToLowerInvariant().Contains(search))
+                                if (foundSession == null)
                                 {
-                                    return s;
+                                    string appId = (string)s.SourceAppUserModelId;
+                                    if (!string.IsNullOrEmpty(appId) && appId.ToLowerInvariant().Contains(search))
+                                    {
+                                        foundSession = s;
+                                        continue;
+                                    }
                                 }
                             }
                             catch { }
+                            SafeReleaseCom(s);
                         }
+                        return foundSession;
                     }
                 }
                 catch { }
+                finally
+                {
+                    SafeReleaseCom(sessions);
+                }
 
                 // Specific target app is selected, but it has no active SMTC session
                 return null;
@@ -558,44 +666,60 @@ namespace TaskbarMediaWidget
             }
             catch { }
 
+            dynamic allSessions = null;
             try
             {
-                dynamic sessions = _sessionManager.GetSessions();
-                if (sessions != null)
+                allSessions = _sessionManager.GetSessions();
+                if (allSessions != null)
                 {
                     dynamic bestSession = null;
-                    foreach (dynamic s in sessions)
+                    foreach (dynamic s in allSessions)
                     {
                         if (s == null) continue;
                         try
                         {
                             dynamic playback = s.GetPlaybackInfo();
+                            int statusVal = 0;
                             if (playback != null)
                             {
-                                int statusVal = (int)playback.PlaybackStatus;
-                                if (statusVal == 4) // Playing
-                                {
-                                    return s;
-                                }
-                                if (statusVal == 5 && bestSession == null) // Paused
-                                {
-                                    bestSession = s;
-                                }
+                                try { statusVal = (int)playback.PlaybackStatus; } catch { }
+                                SafeReleaseCom(playback);
+                            }
+
+                            if (statusVal == 4 && bestSession == null) // Playing
+                            {
+                                bestSession = s;
+                                continue;
+                            }
+                            if (statusVal == 5 && bestSession == null) // Paused
+                            {
+                                bestSession = s;
+                                continue;
                             }
                         }
                         catch { }
+
+                        if (s != bestSession)
+                        {
+                            SafeReleaseCom(s);
+                        }
                     }
+
                     if (bestSession != null) return bestSession;
 
-                    foreach (dynamic s in sessions)
+                    foreach (dynamic s in allSessions)
                     {
                         if (s != null) return s;
                     }
                 }
             }
             catch { }
+            finally
+            {
+                SafeReleaseCom(allSessions);
+            }
 
-            return _currentSession;
+            return null;
         }
 
         private void SendAppCommandToProcess(string targetAppId, int appCommand)
@@ -685,6 +809,10 @@ namespace TaskbarMediaWidget
                 {
                     Program.Log("TogglePlayPause SMTC error: " + ex.Message);
                 }
+                finally
+                {
+                    SafeReleaseCom(session);
+                }
             }
 
             if (!handled)
@@ -713,7 +841,7 @@ namespace TaskbarMediaWidget
 
             if (OnMediaChanged != null) OnMediaChanged();
 
-            // Refresh after a short delay to get the true hardware/SMTC state
+            _forcePropertiesCheck = true;
             Timer t = null;
             t = new Timer(s =>
             {
@@ -740,6 +868,10 @@ namespace TaskbarMediaWidget
                 {
                     Program.Log("NextTrack SMTC error: " + ex.Message);
                 }
+                finally
+                {
+                    SafeReleaseCom(session);
+                }
             }
 
             if (!handled)
@@ -756,6 +888,7 @@ namespace TaskbarMediaWidget
                 }
             }
 
+            _forcePropertiesCheck = true;
             Timer t = null;
             t = new Timer(s =>
             {
@@ -782,6 +915,10 @@ namespace TaskbarMediaWidget
                 {
                     Program.Log("PrevTrack SMTC error: " + ex.Message);
                 }
+                finally
+                {
+                    SafeReleaseCom(session);
+                }
             }
 
             if (!handled)
@@ -798,6 +935,7 @@ namespace TaskbarMediaWidget
                 }
             }
 
+            _forcePropertiesCheck = true;
             Timer t = null;
             t = new Timer(s =>
             {

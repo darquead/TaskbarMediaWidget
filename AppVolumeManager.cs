@@ -107,6 +107,14 @@ namespace TaskbarMediaWidget
             [PreserveSig] int GetMute(out bool muted);
         }
 
+        public static void SafeReleaseCom(object obj)
+        {
+            if (obj != null && Marshal.IsComObject(obj))
+            {
+                try { Marshal.FinalReleaseComObject(obj); } catch { }
+            }
+        }
+
         public class AudioAppInfo
         {
             public string Id { get; set; }
@@ -128,26 +136,26 @@ namespace TaskbarMediaWidget
         public static List<AudioAppInfo> GetActiveAudioApps()
         {
             List<AudioAppInfo> result = new List<AudioAppInfo>();
+            object obj = null;
+            IMMDevice dev = null;
+            object mgrObj = null;
+            IAudioSessionEnumerator sessionEnum = null;
             try
             {
                 Guid clsid = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
                 Guid iid = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
-                object obj;
                 int hr = CoCreateInstance(ref clsid, null, ClsCtxAll, ref iid, out obj);
                 if (hr < 0 || obj == null) return result;
 
                 IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)obj;
-                IMMDevice dev;
                 hr = enumerator.GetDefaultAudioEndpoint(0, 0, out dev);
                 if (hr < 0 || dev == null) return result;
 
                 Guid mgrIid = typeof(IAudioSessionManager2).GUID;
-                object mgrObj;
                 hr = dev.Activate(ref mgrIid, ClsCtxAll, IntPtr.Zero, out mgrObj);
                 if (hr < 0 || mgrObj == null) return result;
 
                 IAudioSessionManager2 mgr = (IAudioSessionManager2)mgrObj;
-                IAudioSessionEnumerator sessionEnum;
                 hr = mgr.GetSessionEnumerator(out sessionEnum);
                 if (hr < 0 || sessionEnum == null) return result;
 
@@ -158,69 +166,76 @@ namespace TaskbarMediaWidget
 
                 for (int i = 0; i < count; i++)
                 {
-                    IAudioSessionControl ctrl;
+                    IAudioSessionControl ctrl = null;
                     if (sessionEnum.GetSession(i, out ctrl) < 0 || ctrl == null) continue;
 
-                    IAudioSessionControl2 ctrl2 = ctrl as IAudioSessionControl2;
-                    IAudioMeterInformation meter = ctrl as IAudioMeterInformation;
-
-                    uint pid = 0;
-                    if (ctrl2 != null) ctrl2.GetProcessId(out pid);
-                    if (pid == 0) continue;
-
-                    int state = 0;
-                    ctrl.GetState(out state);
-                    if (state == 2) continue; // Expired
-
-                    float peak = 0f;
-                    if (meter != null) meter.GetPeakValue(out peak);
-
-                    string pName = "";
-                    string title = "";
                     try
                     {
-                        using (Process p = Process.GetProcessById((int)pid))
+                        IAudioSessionControl2 ctrl2 = ctrl as IAudioSessionControl2;
+                        IAudioMeterInformation meter = ctrl as IAudioMeterInformation;
+
+                        uint pid = 0;
+                        if (ctrl2 != null) ctrl2.GetProcessId(out pid);
+                        if (pid == 0) continue;
+
+                        int state = 0;
+                        ctrl.GetState(out state);
+                        if (state == 2) continue; // Expired
+
+                        float peak = 0f;
+                        if (meter != null) meter.GetPeakValue(out peak);
+
+                        string pName = "";
+                        string title = "";
+                        try
                         {
-                            pName = p.ProcessName;
-                            try
+                            using (Process p = Process.GetProcessById((int)pid))
                             {
-                                string desc = p.MainModule.FileVersionInfo.FileDescription;
-                                title = !string.IsNullOrEmpty(desc) ? desc.Trim() : pName;
-                            }
-                            catch
-                            {
-                                title = pName;
+                                pName = p.ProcessName;
+                                try
+                                {
+                                    string desc = p.MainModule.FileVersionInfo.FileDescription;
+                                    title = !string.IsNullOrEmpty(desc) ? desc.Trim() : pName;
+                                }
+                                catch
+                                {
+                                    title = pName;
+                                }
                             }
                         }
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    string pLower = pName.ToLowerInvariant();
-                    if (pLower == "explorer" || pLower == "dwm" || pLower == "audiodg" ||
-                        pLower == "taskhostw" || pLower == "shellexperiencehost" ||
-                        pLower == "systemsettings" || pLower == "taskbarmediawidget" ||
-                        pLower == "traymixer" || pLower == "translucenttb" ||
-                        pLower.Contains("wallpaper"))
-                    {
-                        continue;
-                    }
-
-                    AudioAppInfo existing;
-                    if (map.TryGetValue(pName, out existing))
-                    {
-                        if (peak > 0.0001f) existing.IsActiveAudio = true;
-                    }
-                    else
-                    {
-                        map[pName] = new AudioAppInfo
+                        catch
                         {
-                            Id = pName + ".exe",
-                            DisplayName = title,
-                            IsActiveAudio = (peak > 0.0001f)
-                        };
+                            continue;
+                        }
+
+                        string pLower = pName.ToLowerInvariant();
+                        if (pLower == "explorer" || pLower == "dwm" || pLower == "audiodg" ||
+                            pLower == "taskhostw" || pLower == "shellexperiencehost" ||
+                            pLower == "systemsettings" || pLower == "taskbarmediawidget" ||
+                            pLower == "traymixer" || pLower == "translucenttb" ||
+                            pLower.Contains("wallpaper"))
+                        {
+                            continue;
+                        }
+
+                        AudioAppInfo existing;
+                        if (map.TryGetValue(pName, out existing))
+                        {
+                            if (peak > 0.0001f) existing.IsActiveAudio = true;
+                        }
+                        else
+                        {
+                            map[pName] = new AudioAppInfo
+                            {
+                                Id = pName + ".exe",
+                                DisplayName = title,
+                                IsActiveAudio = (peak > 0.0001f)
+                            };
+                        }
+                    }
+                    finally
+                    {
+                        SafeReleaseCom(ctrl);
                     }
                 }
 
@@ -233,31 +248,40 @@ namespace TaskbarMediaWidget
             {
                 Program.Log("GetActiveAudioApps error: " + ex.Message);
             }
+            finally
+            {
+                SafeReleaseCom(sessionEnum);
+                SafeReleaseCom(mgrObj);
+                SafeReleaseCom(dev);
+                SafeReleaseCom(obj);
+            }
             return result;
         }
 
         public static string ChangeVolume(int delta, string mediaAppId)
         {
+            object obj = null;
+            IMMDevice dev = null;
+            object mgrObj = null;
+            IAudioSessionEnumerator sessionEnum = null;
+            List<object> comToRelease = new List<object>();
+
             try
             {
                 Guid clsid = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
                 Guid iid = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
-                object obj;
                 int hr = CoCreateInstance(ref clsid, null, ClsCtxAll, ref iid, out obj);
                 if (hr < 0 || obj == null) return FallbackMaster(delta);
 
                 IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)obj;
-                IMMDevice dev;
                 hr = enumerator.GetDefaultAudioEndpoint(0, 0, out dev);
                 if (hr < 0 || dev == null) return FallbackMaster(delta);
 
                 Guid mgrIid = typeof(IAudioSessionManager2).GUID;
-                object mgrObj;
                 hr = dev.Activate(ref mgrIid, ClsCtxAll, IntPtr.Zero, out mgrObj);
                 if (hr < 0 || mgrObj == null) return FallbackMaster(delta);
 
                 IAudioSessionManager2 mgr = (IAudioSessionManager2)mgrObj;
-                IAudioSessionEnumerator sessionEnum;
                 hr = mgr.GetSessionEnumerator(out sessionEnum);
                 if (hr < 0 || sessionEnum == null) return FallbackMaster(delta);
 
@@ -270,6 +294,7 @@ namespace TaskbarMediaWidget
                 {
                     IAudioSessionControl ctrl;
                     if (sessionEnum.GetSession(i, out ctrl) < 0 || ctrl == null) continue;
+                    comToRelease.Add(ctrl);
 
                     IAudioSessionControl2 ctrl2 = ctrl as IAudioSessionControl2;
                     ISimpleAudioVolume vol = ctrl as ISimpleAudioVolume;
@@ -414,16 +439,27 @@ namespace TaskbarMediaWidget
             {
                 Program.Log("AppVolumeManager error: " + ex.Message);
             }
+            finally
+            {
+                foreach (object c in comToRelease)
+                {
+                    SafeReleaseCom(c);
+                }
+                SafeReleaseCom(sessionEnum);
+                SafeReleaseCom(mgrObj);
+                SafeReleaseCom(dev);
+                SafeReleaseCom(obj);
+            }
 
             return FallbackMaster(delta);
         }
 
         private static string FallbackEndpointVolume(IMMDevice dev, int delta)
         {
+            object epObj = null;
             try
             {
                 Guid epIid = typeof(IAudioEndpointVolume).GUID;
-                object epObj;
                 if (dev.Activate(ref epIid, ClsCtxAll, IntPtr.Zero, out epObj) >= 0 && epObj != null)
                 {
                     IAudioEndpointVolume epVol = (IAudioEndpointVolume)epObj;
@@ -440,6 +476,10 @@ namespace TaskbarMediaWidget
                 }
             }
             catch { }
+            finally
+            {
+                SafeReleaseCom(epObj);
+            }
 
             return FallbackMaster(delta);
         }

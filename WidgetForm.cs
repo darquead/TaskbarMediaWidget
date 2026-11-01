@@ -90,6 +90,21 @@ namespace TaskbarMediaWidget
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
 
+        [DllImport("psapi.dll")]
+        private static extern int EmptyWorkingSet(IntPtr hwProc);
+
+        public static void TrimMemory()
+        {
+            try
+            {
+                GC.Collect(2, GCCollectionMode.Forced);
+                GC.WaitForPendingFinalizers();
+                GC.Collect(2, GCCollectionMode.Forced);
+                EmptyWorkingSet(Process.GetCurrentProcess().Handle);
+            }
+            catch { }
+        }
+
         private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
         [StructLayout(LayoutKind.Sequential)]
@@ -178,6 +193,13 @@ namespace TaskbarMediaWidget
         private bool _hasDragged = false;
         public event Action OnLanguageChanged;
 
+        private int _trimCounter = 0;
+        private IntPtr _lastFgHwnd = IntPtr.Zero;
+        private bool _lastFgIsFullscreen = false;
+        private int _lastFgCheckTick = 0;
+        private int _cachedTaskbarAl = -1;
+        private int _lastTaskbarAlCheckTick = 0;
+
         private Font _iconFont;
         private Font _textFont;
 
@@ -219,11 +241,17 @@ namespace TaskbarMediaWidget
             _engine.OnMediaChanged += OnMediaInfoChanged;
 
             _pollTimer = new Timer();
-            _pollTimer.Interval = 100;
+            _pollTimer.Interval = 500;
             _pollTimer.Tick += (s, e) =>
             {
                 UpdatePosition();
                 _engine.Refresh();
+                _trimCounter++;
+                if (_trimCounter >= 60) // every 30 seconds (60 * 500ms)
+                {
+                    _trimCounter = 0;
+                    TrimMemory();
+                }
             };
             _pollTimer.Start();
 
@@ -603,6 +631,16 @@ namespace TaskbarMediaWidget
             if (fg == IntPtr.Zero || fg == hTray || fg == Handle) return false;
             if (IsIconic(fg)) return false;
 
+            int now = Environment.TickCount;
+            if (fg == _lastFgHwnd && (now - _lastFgCheckTick < 2000))
+            {
+                return _lastFgIsFullscreen;
+            }
+
+            _lastFgHwnd = fg;
+            _lastFgCheckTick = now;
+            _lastFgIsFullscreen = false;
+
             uint fgPid;
             GetWindowThreadProcessId(fg, out fgPid);
             uint trayPid;
@@ -659,14 +697,15 @@ namespace TaskbarMediaWidget
 
             RECT fgRect;
             GetWindowRect(fg, out fgRect);
-            Rectangle screenBounds = Screen.FromHandle(Handle).Bounds;
+            Rectangle screenBounds = Screen.PrimaryScreen.Bounds;
 
             bool coversScreen = (fgRect.Left <= screenBounds.Left && fgRect.Top <= screenBounds.Top &&
                                  fgRect.Right >= screenBounds.Right && fgRect.Bottom >= screenBounds.Bottom);
             bool coversTaskbar = (fgRect.Left <= trayRect.Left && fgRect.Top <= trayRect.Top &&
                                   fgRect.Right >= trayRect.Right && fgRect.Bottom >= trayRect.Bottom);
 
-            return coversScreen && coversTaskbar;
+            _lastFgIsFullscreen = coversScreen && coversTaskbar;
+            return _lastFgIsFullscreen;
         }
 
         private bool IsStartInCorner(IntPtr hStart, RECT startRect, RECT trayRect, bool isVertical)
@@ -676,19 +715,29 @@ namespace TaskbarMediaWidget
                 return (hStart == IntPtr.Zero || startRect.Top < trayRect.Top + 200);
             }
 
-            try
+            int now = Environment.TickCount;
+            if (_cachedTaskbarAl == -1 || (now - _lastTaskbarAlCheckTick > 30000))
             {
-                object val = Microsoft.Win32.Registry.GetValue(
-                    @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                    "TaskbarAl", null);
-                if (val != null)
+                _lastTaskbarAlCheckTick = now;
+                try
                 {
-                    int al = Convert.ToInt32(val);
-                    if (al == 0) return true;  // Explicitly Left
-                    if (al == 1) return false; // Explicitly Center
+                    object val = Microsoft.Win32.Registry.GetValue(
+                        @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                        "TaskbarAl", null);
+                    if (val != null)
+                    {
+                        _cachedTaskbarAl = Convert.ToInt32(val);
+                    }
+                    else
+                    {
+                        _cachedTaskbarAl = -1;
+                    }
                 }
+                catch { _cachedTaskbarAl = -1; }
             }
-            catch { }
+
+            if (_cachedTaskbarAl == 0) return true;  // Explicitly Left
+            if (_cachedTaskbarAl == 1) return false; // Explicitly Center
 
             return (hStart == IntPtr.Zero || startRect.Left < trayRect.Left + 200);
         }
